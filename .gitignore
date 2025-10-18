@@ -1,0 +1,27 @@
+# Build output
+/build/
+/out/
+/bin/
+/obj/
+/Debug/
+/Release/
+/x64/
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# VS / VSCode
+*.VC.db
+*.VC.opendb
+.vscode/
+
+# SDL and runtime stuff you copy next to the exe
+*.dll
+
+# Logs/temp
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db

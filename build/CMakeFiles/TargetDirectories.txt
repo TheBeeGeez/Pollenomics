@@ -1,3 +1,0 @@
-D:/bee/build/CMakeFiles/bee_sim.dir
-D:/bee/build/CMakeFiles/ALL_BUILD.dir
-D:/bee/build/CMakeFiles/ZERO_CHECK.dir
