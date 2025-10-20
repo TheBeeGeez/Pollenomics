@@ -4,12 +4,14 @@
 #include "platform.h"
 #include "render.h"
 #include "sim.h"
+#include "ui.h"
 
 #include "util/log.h"
 
 static Platform g_platform = {0};
 static Render g_render = {0};
 static Params g_params = {0};
+static Params g_params_runtime = {0};
 static SimState *g_sim = NULL;
 static bool g_app_initialized = false;
 static bool g_app_should_quit = false;
@@ -35,6 +37,9 @@ static void app_reset_camera(void) {
     g_camera.center_world[1] = g_default_center_world[1];
     g_camera.zoom = g_default_zoom;
 }
+
+static void app_recompute_world_defaults(void);
+static bool app_apply_runtime_params(bool reinit_required);
 
 static void app_update_camera(const Input *input, float dt_sec) {
     if (!input || g_fb_width <= 0 || g_fb_height <= 0) {
@@ -101,6 +106,31 @@ static void app_update_camera(const Input *input, float dt_sec) {
     }
 }
 
+static void app_recompute_world_defaults(void) {
+    float world_w = g_params.world_width_px > 0.0f ? g_params.world_width_px : (float)g_fb_width;
+    float world_h = g_params.world_height_px > 0.0f ? g_params.world_height_px : (float)g_fb_height;
+
+    g_default_center_world[0] = world_w * 0.5f;
+    g_default_center_world[1] = world_h * 0.5f;
+    if (world_w <= 0.0f) {
+        g_default_center_world[0] = 0.0f;
+    }
+    if (world_h <= 0.0f) {
+        g_default_center_world[1] = 0.0f;
+    }
+
+    if (world_w > 0.0f && world_h > 0.0f && g_fb_width > 0 && g_fb_height > 0) {
+        float fit_x = (float)g_fb_width / world_w;
+        float fit_y = (float)g_fb_height / world_h;
+        g_default_zoom = fit_x < fit_y ? fit_x : fit_y;
+    } else {
+        g_default_zoom = 1.0f;
+    }
+    if (g_default_zoom <= 0.0f) {
+        g_default_zoom = 1.0f;
+    }
+}
+
 static double g_sim_accumulator_sec = 0.0;
 static bool g_sim_paused = false;
 static double g_log_accumulator_sec = 0.0;
@@ -122,6 +152,7 @@ bool app_init(const Params *params) {
     }
 
     g_params = *params;
+    g_params_runtime = g_params;
     if (g_params.sim_fixed_dt > 0.0f) {
         g_sim_fixed_dt = g_params.sim_fixed_dt;
     } else {
@@ -168,8 +199,12 @@ bool app_init(const Params *params) {
         return false;
     }
 
+    ui_init();
+    ui_sync_to_params(&g_params, &g_params_runtime);
+
     if (!sim_init(&g_sim, &g_params)) {
         LOG_ERROR("Simulation initialization failed");
+        ui_shutdown();
         render_shutdown(&g_render);
         plat_shutdown(&g_platform);
         return false;
@@ -190,26 +225,7 @@ bool app_init(const Params *params) {
     if (g_fb_height <= 0) {
         g_fb_height = g_params.window_height_px;
     }
-    float world_w = g_params.world_width_px > 0.0f ? g_params.world_width_px : (float)g_fb_width;
-    float world_h = g_params.world_height_px > 0.0f ? g_params.world_height_px : (float)g_fb_height;
-    g_default_center_world[0] = world_w * 0.5f;
-    g_default_center_world[1] = world_h * 0.5f;
-    if (world_w <= 0.0f) {
-        g_default_center_world[0] = 0.0f;
-    }
-    if (world_h <= 0.0f) {
-        g_default_center_world[1] = 0.0f;
-    }
-    if (world_w > 0.0f && world_h > 0.0f && g_fb_width > 0 && g_fb_height > 0) {
-        float fit_x = (float)g_fb_width / world_w;
-        float fit_y = (float)g_fb_height / world_h;
-        g_default_zoom = fit_x < fit_y ? fit_x : fit_y;
-    } else {
-        g_default_zoom = 1.0f;
-    }
-    if (g_default_zoom <= 0.0f) {
-        g_default_zoom = 1.0f;
-    }
+    app_recompute_world_defaults();
     app_reset_camera();
 
     g_sim_accumulator_sec = 0.0;
@@ -225,27 +241,116 @@ bool app_init(const Params *params) {
     return true;
 }
 
+static bool app_apply_runtime_params(bool reinit_required) {
+    Params new_params = g_params_runtime;
+    char err[256];
+    if (!params_validate(&new_params, err, sizeof err)) {
+        LOG_WARN("runtime params invalid: %s", err);
+        g_params_runtime = g_params;
+        ui_sync_to_params(&g_params, &g_params_runtime);
+        return false;
+    }
+
+    bool world_changed =
+        fabsf(new_params.world_width_px - g_params.world_width_px) > 0.0001f ||
+        fabsf(new_params.world_height_px - g_params.world_height_px) > 0.0001f;
+
+    if (reinit_required) {
+        SimState *fresh = NULL;
+        if (!sim_init(&fresh, &new_params)) {
+            LOG_ERROR("sim reinit failed; keeping previous simulation");
+            g_params_runtime = g_params;
+            ui_sync_to_params(&g_params, &g_params_runtime);
+            return false;
+        }
+        sim_shutdown(g_sim);
+        g_sim = fresh;
+        g_sim_accumulator_sec = 0.0;
+    } else if (g_sim) {
+        sim_apply_runtime_params(g_sim, &new_params);
+    }
+
+    render_set_clear_color(&g_render, new_params.clear_color_rgba);
+
+    g_params = new_params;
+    if (g_params.sim_fixed_dt > 0.0f) {
+        g_sim_fixed_dt = g_params.sim_fixed_dt;
+    }
+
+    if (reinit_required || world_changed) {
+        app_recompute_world_defaults();
+        app_reset_camera();
+    }
+
+    g_params_runtime = g_params;
+    ui_sync_to_params(&g_params, &g_params_runtime);
+    LOG_INFO("ui: applied params (reinit=%d)", reinit_required ? 1 : 0);
+    return true;
+}
+
 void app_frame(void) {
     if (!g_app_initialized) {
         return;
     }
 
-    Input input = {0};
-    Timing timing = {0};
+    Input input = (Input){0};
+    Timing timing = (Timing){0};
     plat_pump(&g_platform, &input, &timing);
+
+    UiActions ui_actions = ui_update(&input, g_sim_paused, timing.dt_sec);
+    bool ui_mouse = ui_wants_mouse();
+    bool ui_keyboard = ui_wants_keyboard();
 
     if (input.quit_requested) {
         g_app_should_quit = true;
     }
 
-    app_update_camera(&input, timing.dt_sec);
+    if (ui_actions.apply) {
+        app_apply_runtime_params(ui_actions.reinit_required);
+    }
+    if (ui_actions.reset) {
+        LOG_INFO("ui: runtime params reset to baseline");
+    }
 
-    if (input.key_space_pressed) {
+    bool toggle_pause = ui_actions.toggle_pause;
+    if (!ui_keyboard && input.key_space_pressed) {
+        toggle_pause = true;
+    }
+    if (toggle_pause) {
         g_sim_paused = !g_sim_paused;
         LOG_INFO("pause=%d", g_sim_paused ? 1 : 0);
     }
 
-    bool step_requested = input.key_period_pressed && g_sim_paused;
+    bool step_requested = false;
+    if (ui_actions.step_once) {
+        step_requested = true;
+    }
+    if (!ui_keyboard && input.key_period_pressed) {
+        step_requested = true;
+    }
+    step_requested = step_requested && g_sim_paused;
+
+    Input camera_input = input;
+    if (ui_mouse) {
+        camera_input.mouse_right_down = false;
+        camera_input.mouse_right_pressed = false;
+        camera_input.mouse_dx_px = 0.0f;
+        camera_input.mouse_dy_px = 0.0f;
+        camera_input.wheel_y = 0;
+    }
+    if (ui_keyboard) {
+        camera_input.key_plus_pressed = false;
+        camera_input.key_minus_pressed = false;
+        camera_input.key_plus_down = false;
+        camera_input.key_minus_down = false;
+        camera_input.key_reset_pressed = false;
+        camera_input.key_w_down = false;
+        camera_input.key_a_down = false;
+        camera_input.key_s_down = false;
+        camera_input.key_d_down = false;
+    }
+
+    app_update_camera(&camera_input, timing.dt_sec);
 
     if (!g_sim_paused) {
         g_sim_accumulator_sec += timing.dt_sec;
@@ -310,22 +415,16 @@ void app_frame(void) {
         if (fb_h > 0) {
             g_fb_height = fb_h;
         }
-        if (g_params.world_width_px > 0.0f && g_params.world_height_px > 0.0f && g_fb_width > 0 && g_fb_height > 0) {
-            float fit_x = (float)g_fb_width / g_params.world_width_px;
-            float fit_y = (float)g_fb_height / g_params.world_height_px;
-            float new_default_zoom = fit_x < fit_y ? fit_x : fit_y;
-            if (new_default_zoom > 0.0f) {
-                g_default_zoom = new_default_zoom;
-            }
-        }
+        app_recompute_world_defaults();
     }
 
-    RenderView view = {0};
+    RenderView view = (RenderView){0};
     if (g_sim) {
         view = sim_build_view(g_sim);
     }
     render_set_camera(&g_render, &g_camera);
     render_frame(&g_render, &view);
+    ui_render(g_fb_width, g_fb_height);
     plat_swap(&g_platform);
 }
 
@@ -336,6 +435,7 @@ void app_shutdown(void) {
 
     sim_shutdown(g_sim);
     g_sim = NULL;
+    ui_shutdown();
     render_shutdown(&g_render);
     plat_shutdown(&g_platform);
     log_shutdown();

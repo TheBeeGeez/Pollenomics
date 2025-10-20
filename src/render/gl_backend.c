@@ -391,6 +391,26 @@ void render_set_camera(Render *render, const RenderCamera *camera) {
     }
 }
 
+void render_set_clear_color(Render *render, const float rgba[4]) {
+    if (!render || !render->state) {
+        return;
+    }
+    RenderState *state = (RenderState *)render->state;
+    if (!rgba) {
+        return;
+    }
+    for (int i = 0; i < 4; ++i) {
+        float c = rgba[i];
+        if (c < 0.0f) {
+            c = 0.0f;
+        }
+        if (c > 1.0f) {
+            c = 1.0f;
+        }
+        state->clear_color[i] = c;
+    }
+}
+
 void render_frame(Render *render, const RenderView *view) {
     if (!render || !render->state) {
         return;

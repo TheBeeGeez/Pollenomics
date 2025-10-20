@@ -32,6 +32,9 @@ void render_resize(Render *render, int fb_w, int fb_h);
 void render_set_camera(Render *render, const RenderCamera *camera);
 // Updates the camera parameters used by subsequent render_frame calls.
 
+void render_set_clear_color(Render *render, const float rgba[4]);
+// Applies a new RGBA clear color used at the start of each frame.
+
 void render_frame(Render *render, const RenderView *view);
 // Issues draw commands for the current frame using the provided view; must not
 // swap buffers.
