@@ -42,6 +42,29 @@ typedef enum BeeIntent {
     BEE_INTENT_EXPLORE = 5,
 } BeeIntent;
 
+typedef struct BeeDebugInfo {
+    size_t index;
+    float pos_x;
+    float pos_y;
+    float vel_x;
+    float vel_y;
+    float speed;
+    float radius;
+    float age_days;
+    float state_time;
+    float energy;
+    float load_nectar;
+    float target_pos_x;
+    float target_pos_y;
+    int32_t target_id;
+    int16_t topic_id;
+    uint8_t topic_confidence;
+    uint8_t role;
+    uint8_t mode;
+    uint8_t intent;
+    bool inside_hive;
+} BeeDebugInfo;
+
 bool sim_init(SimState **out_state, const Params *params);
 // Allocates and initializes the simulation buffers using Params. Returns false
 // on allocation failure or invalid arguments, leaving *out_state untouched.
@@ -62,5 +85,11 @@ void sim_apply_runtime_params(SimState *state, const Params *params);
 
 void sim_shutdown(SimState *state);
 // Frees all simulation resources; safe to call on null.
+
+size_t sim_find_bee_near(const SimState *state, float world_x, float world_y, float radius_world);
+// Returns the index of the closest bee within radius_world (inclusive), or SIZE_MAX when none.
+
+bool sim_get_bee_info(const SimState *state, size_t index, BeeDebugInfo *out_info);
+// Populates BeeDebugInfo for the given index; returns false if out of range.
 
 #endif  // SIM_H

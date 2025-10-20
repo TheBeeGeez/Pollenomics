@@ -1087,3 +1087,61 @@ void sim_reset(SimState *state, uint64_t seed) {
 void sim_shutdown(SimState *state) {
     sim_release(state);
 }
+
+size_t sim_find_bee_near(const SimState *state, float world_x, float world_y, float radius_world) {
+    if (!state || state->count == 0 || radius_world <= 0.0f) {
+        return SIZE_MAX;
+    }
+    float best_dist_sq = radius_world * radius_world;
+    size_t best_index = SIZE_MAX;
+    for (size_t i = 0; i < state->count; ++i) {
+        float dx = state->x[i] - world_x;
+        float dy = state->y[i] - world_y;
+        float combined = radius_world + state->radius[i];
+        float limit_sq = combined * combined;
+        float dist_sq = dx * dx + dy * dy;
+        if (dist_sq <= limit_sq && dist_sq <= best_dist_sq) {
+            best_dist_sq = dist_sq;
+            best_index = i;
+        }
+    }
+    return best_index;
+}
+
+bool sim_get_bee_info(const SimState *state, size_t index, BeeDebugInfo *out_info) {
+    if (!state || !out_info || index >= state->count) {
+        return false;
+    }
+    BeeDebugInfo info = {0};
+    info.index = index;
+    info.pos_x = state->x[index];
+    info.pos_y = state->y[index];
+    info.vel_x = state->vx[index];
+    info.vel_y = state->vy[index];
+    info.speed = sqrtf(state->vx[index] * state->vx[index] + state->vy[index] * state->vy[index]);
+    info.radius = state->radius[index];
+    info.age_days = state->age_days[index];
+    info.state_time = state->t_state[index];
+    info.energy = state->energy[index];
+    info.load_nectar = state->load_nectar[index];
+    info.target_pos_x = state->target_pos_x[index];
+    info.target_pos_y = state->target_pos_y[index];
+    info.target_id = state->target_id[index];
+    info.topic_id = state->topic_id[index];
+    info.topic_confidence = state->topic_confidence[index];
+    info.role = state->role[index];
+    info.mode = state->mode[index];
+    info.intent = state->intent[index];
+
+    bool inside_hive = false;
+    if (state->hive_enabled && state->hive_rect_w > 0.0f && state->hive_rect_h > 0.0f) {
+        inside_hive = (info.pos_x >= state->hive_rect_x &&
+                       info.pos_x <= state->hive_rect_x + state->hive_rect_w &&
+                       info.pos_y >= state->hive_rect_y &&
+                       info.pos_y <= state->hive_rect_y + state->hive_rect_h);
+    }
+    info.inside_hive = inside_hive;
+
+    *out_info = info;
+    return true;
+}

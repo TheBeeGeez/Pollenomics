@@ -87,6 +87,9 @@ typedef struct {
     float cam_zoom;
     int fb_width;
     int fb_height;
+    bool selected_valid;
+    bool selected_panel_open;
+    BeeDebugInfo selected_bee;
 } UiState;
 
 static UiState g_ui;
@@ -208,6 +211,42 @@ static float ui_measure_text(const char *text) {
         max_width = line_width;
     }
     return max_width;
+}
+
+static const char *ui_role_name(uint8_t role) {
+    switch (role) {
+        case BEE_ROLE_NURSE: return "NURSE";
+        case BEE_ROLE_HOUSEKEEPER: return "HOUSEKEEPER";
+        case BEE_ROLE_STORAGE: return "STORAGE";
+        case BEE_ROLE_FORAGER: return "FORAGER";
+        case BEE_ROLE_SCOUT: return "SCOUT";
+        case BEE_ROLE_GUARD: return "GUARD";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char *ui_mode_name(uint8_t mode) {
+    switch (mode) {
+        case BEE_MODE_IDLE: return "IDLE";
+        case BEE_MODE_FORAGING: return "FORAGING";
+        case BEE_MODE_RETURNING: return "RETURNING";
+        case BEE_MODE_APPROACH_ENTRANCE: return "APPROACH ENTRANCE";
+        case BEE_MODE_INSIDE_MOVE: return "INSIDE MOVE";
+        case BEE_MODE_UNLOAD_WAIT: return "UNLOAD WAIT";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char *ui_intent_name(uint8_t intent) {
+    switch (intent) {
+        case BEE_INTENT_FIND_PATCH: return "FIND PATCH";
+        case BEE_INTENT_HARVEST: return "HARVEST";
+        case BEE_INTENT_RETURN_HOME: return "RETURN HOME";
+        case BEE_INTENT_UNLOAD: return "UNLOAD";
+        case BEE_INTENT_REST: return "REST";
+        case BEE_INTENT_EXPLORE: return "EXPLORE";
+        default: return "UNKNOWN";
+    }
 }
 
 static void ui_world_to_screen(float wx, float wy, float *sx, float *sy) {
@@ -364,6 +403,17 @@ void ui_set_viewport(const RenderCamera *camera, int framebuffer_width, int fram
 void ui_enable_hive_overlay(bool enabled) {
     g_ui.show_hive_overlay = enabled;
 }
+
+void ui_set_selected_bee(const BeeDebugInfo *info, bool valid) {
+    if (valid && info) {
+        g_ui.selected_bee = *info;
+        g_ui.selected_valid = true;
+        g_ui.selected_panel_open = true;
+    } else {
+        g_ui.selected_valid = false;
+        g_ui.selected_panel_open = false;
+    }
+}
 #define GLYPH(ch, r0, r1, r2, r3, r4, r5, r6) \
     { ch, { r0, r1, r2, r3, r4, r5, r6 } }
 
@@ -486,6 +536,95 @@ static void ui_draw_text(float x, float y, const char *text, UiColor color) {
     }
 }
 
+static void ui_draw_selected_bee_panel(void) {
+    if (!g_ui.selected_panel_open || !g_ui.selected_valid) {
+        return;
+    }
+    if (g_ui.fb_width <= 0 || g_ui.fb_height <= 0) {
+        return;
+    }
+
+    const float panel_width = 260.0f;
+    float origin_x = (float)g_ui.fb_width - panel_width - UI_PANEL_MARGIN;
+    if (origin_x < UI_PANEL_MARGIN) {
+        origin_x = UI_PANEL_MARGIN;
+    }
+    float origin_y = UI_PANEL_MARGIN;
+    UiColor bg = ui_color_rgba(0.10f, 0.10f, 0.14f, 0.94f);
+    UiColor header = ui_color_rgba(0.95f, 0.95f, 0.98f, 1.0f);
+    UiColor text_color = ui_color_rgba(0.85f, 0.88f, 0.92f, 1.0f);
+    UiColor accent = ui_color_rgba(0.30f, 0.65f, 0.95f, 1.0f);
+
+    size_t bg_idx = ui_add_rect(origin_x, origin_y, panel_width, 1.0f, bg);
+
+    float cursor_y = origin_y + 18.0f;
+    float text_x = origin_x + 16.0f;
+    char line[128];
+    const BeeDebugInfo *info = &g_ui.selected_bee;
+
+    ui_draw_text(text_x, cursor_y, "BEE DETAILS", header);
+    cursor_y += 22.0f;
+
+    snprintf(line, sizeof(line), "ID #%zu", info->index);
+    ui_draw_text(text_x, cursor_y, line, accent);
+    cursor_y += 20.0f;
+
+    snprintf(line, sizeof(line), "Role: %s", ui_role_name(info->role));
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Mode: %s", ui_mode_name(info->mode));
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Intent: %s", ui_intent_name(info->intent));
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 24.0f;
+
+    int energy_pct = (int)(info->energy * 100.0f + 0.5f);
+    int load_pct = (int)(info->load_nectar * 100.0f + 0.5f);
+    snprintf(line, sizeof(line), "Energy: %d%%", energy_pct);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Nectar Load: %d%%", load_pct);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Speed: %.1f px/s", info->speed);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Age: %.1f days", info->age_days);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "State time: %.2f s", info->state_time);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Position: (%.1f, %.1f)", info->pos_x, info->pos_y);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Target: (%.1f, %.1f)", info->target_pos_x, info->target_pos_y);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Target ID: %d", info->target_id);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    snprintf(line, sizeof(line), "Topic ID: %d (conf %u)", info->topic_id, info->topic_confidence);
+    ui_draw_text(text_x, cursor_y, line, text_color);
+    cursor_y += 18.0f;
+
+    ui_draw_text(text_x, cursor_y, info->inside_hive ? "Inside Hive" : "Outside", text_color);
+    cursor_y += 24.0f;
+
+    float panel_h = (cursor_y + 12.0f) - origin_y;
+    ui_update_rect(bg_idx, origin_x, origin_y, panel_width, panel_h);
+}
 static GLuint ui_create_shader(const char *vs_src, const char *fs_src) {
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vs_src, NULL);
@@ -533,6 +672,8 @@ void ui_init(void) {
     g_ui.show_hive_overlay = true;
     g_ui.has_camera = false;
     g_ui.cam_zoom = 1.0f;
+    g_ui.selected_valid = false;
+    g_ui.selected_panel_open = false;
 
     glGenVertexArrays(1, &g_ui.vao);
     glGenBuffers(1, &g_ui.vbo);
@@ -631,6 +772,7 @@ static void ui_begin_frame(const Input *input) {
         g_ui.wants_mouse = g_ui.capturing_mouse;
         g_ui.wants_keyboard = false;
         g_ui.prev_mouse_down = mouse_down;
+        ui_draw_selected_bee_panel();
         return;
     }
 
@@ -910,6 +1052,8 @@ static void ui_begin_frame(const Input *input) {
     g_ui.mouse_over_panel = ui_rect_contains(&panel_rect, g_ui.mouse_x, g_ui.mouse_y);
     g_ui.wants_mouse = g_ui.capturing_mouse || g_ui.mouse_over_panel;
     g_ui.wants_keyboard = true;
+
+    ui_draw_selected_bee_panel();
 
     if (g_ui.active_slider >= 0 && !mouse_down) {
         g_ui.active_slider = -1;
