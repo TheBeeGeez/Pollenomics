@@ -50,6 +50,18 @@ void params_init_defaults(Params *params) {
     params->motion_spawn_speed_std = 10.0f;
     params->motion_spawn_mode = SPAWN_VELOCITY_UNIFORM_DIR;
     params->rng_seed = UINT64_C(0xBEE);
+
+    params->hive.rect_x = 200.0f;
+    params->hive.rect_y = 200.0f;
+    params->hive.rect_w = 400.0f;
+    params->hive.rect_h = 260.0f;
+    params->hive.entrance_side = 1;  // bottom
+    params->hive.entrance_t = 0.5f;
+    params->hive.entrance_width = 120.0f;
+    params->hive.restitution = 0.8f;
+    params->hive.tangent_damp = 0.9f;
+    params->hive.max_resolve_iters = 2;
+    params->hive.safety_margin = 0.5f;
 }
 
 bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
@@ -185,6 +197,83 @@ bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
             if (err_buf && err_cap > 0) {
                 snprintf(err_buf, err_cap,
                          "bee_color_rgba[%d] (%f) must be within [0, 1]", i, c);
+            }
+            return false;
+        }
+    }
+
+    bool hive_enabled = params->hive.rect_w > 0.0f && params->hive.rect_h > 0.0f;
+    if (params->hive.rect_w < 0.0f || params->hive.rect_h < 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "hive dimensions must be non-negative (got %.2f x %.2f)",
+                     params->hive.rect_w, params->hive.rect_h);
+        }
+        return false;
+    }
+    if (hive_enabled) {
+        if (params->hive.entrance_side < 0 || params->hive.entrance_side > 3) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap,
+                         "hive entrance_side (%d) must be 0-3", params->hive.entrance_side);
+            }
+            return false;
+        }
+        if (params->hive.entrance_t < 0.0f || params->hive.entrance_t > 1.0f) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap,
+                         "hive entrance_t (%.2f) must be within [0, 1]", params->hive.entrance_t);
+            }
+            return false;
+        }
+        if (params->hive.entrance_width <= 0.0f) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap, "hive entrance_width (%.2f) must be > 0",
+                         params->hive.entrance_width);
+            }
+            return false;
+        }
+        float side_length = (params->hive.entrance_side == 2 || params->hive.entrance_side == 3)
+                                ? params->hive.rect_h
+                                : params->hive.rect_w;
+        float max_radius = params->bee_radius_px;
+        float required_clearance = 2.0f * max_radius;
+        if (params->hive.entrance_width > side_length - required_clearance) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap,
+                         "hive entrance_width (%.2f) must be <= side length minus 2*bee_radius (%.2f)",
+                         params->hive.entrance_width, side_length - required_clearance);
+            }
+            return false;
+        }
+        if (params->hive.restitution < 0.0f || params->hive.restitution > 1.0f) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap,
+                         "hive restitution (%.2f) must be within [0, 1]", params->hive.restitution);
+            }
+            return false;
+        }
+        if (params->hive.tangent_damp < 0.0f || params->hive.tangent_damp > 1.0f) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap,
+                         "hive tangent_damp (%.2f) must be within [0, 1]",
+                         params->hive.tangent_damp);
+            }
+            return false;
+        }
+        if (params->hive.max_resolve_iters < 0 || params->hive.max_resolve_iters > 8) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap,
+                         "hive max_resolve_iters (%d) must be within [0, 8]",
+                         params->hive.max_resolve_iters);
+            }
+            return false;
+        }
+        if (params->hive.safety_margin < 0.0f || params->hive.safety_margin > 5.0f) {
+            if (err_buf && err_cap > 0) {
+                snprintf(err_buf, err_cap,
+                         "hive safety_margin (%.2f) must be within [0, 5]",
+                         params->hive.safety_margin);
             }
             return false;
         }

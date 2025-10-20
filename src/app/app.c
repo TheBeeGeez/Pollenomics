@@ -297,6 +297,8 @@ void app_frame(void) {
     Timing timing = (Timing){0};
     plat_pump(&g_platform, &input, &timing);
 
+    ui_set_viewport(&g_camera, g_fb_width, g_fb_height);
+
     UiActions ui_actions = ui_update(&input, g_sim_paused, timing.dt_sec);
     bool ui_mouse = ui_wants_mouse();
     bool ui_keyboard = ui_wants_keyboard();

@@ -15,6 +15,33 @@ typedef struct SimInit {
     size_t capacity_override;  // Future: allow manual capacity specification.
 } SimInit;
 
+typedef enum BeeRole {
+    BEE_ROLE_NURSE = 0,
+    BEE_ROLE_HOUSEKEEPER = 1,
+    BEE_ROLE_STORAGE = 2,
+    BEE_ROLE_FORAGER = 3,
+    BEE_ROLE_SCOUT = 4,
+    BEE_ROLE_GUARD = 5,
+} BeeRole;
+
+typedef enum BeeMode {
+    BEE_MODE_IDLE = 0,
+    BEE_MODE_FORAGING = 1,
+    BEE_MODE_RETURNING = 2,
+    BEE_MODE_APPROACH_ENTRANCE = 3,
+    BEE_MODE_INSIDE_MOVE = 4,
+    BEE_MODE_UNLOAD_WAIT = 5,
+} BeeMode;
+
+typedef enum BeeIntent {
+    BEE_INTENT_FIND_PATCH = 0,
+    BEE_INTENT_HARVEST = 1,
+    BEE_INTENT_RETURN_HOME = 2,
+    BEE_INTENT_UNLOAD = 3,
+    BEE_INTENT_REST = 4,
+    BEE_INTENT_EXPLORE = 5,
+} BeeIntent;
+
 bool sim_init(SimState **out_state, const Params *params);
 // Allocates and initializes the simulation buffers using Params. Returns false
 // on allocation failure or invalid arguments, leaving *out_state untouched.

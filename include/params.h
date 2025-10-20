@@ -36,6 +36,20 @@ typedef struct Params {
     float motion_spawn_speed_std;
     int motion_spawn_mode;
     uint64_t rng_seed;
+
+    struct {
+        float rect_x;
+        float rect_y;
+        float rect_w;
+        float rect_h;
+        int entrance_side;       // 0=top,1=bottom,2=left,3=right
+        float entrance_t;        // normalized along side [0, 1]
+        float entrance_width;
+        float restitution;
+        float tangent_damp;
+        int max_resolve_iters;
+        float safety_margin;
+    } hive;
 } Params;
 
 void params_init_defaults(Params *params);

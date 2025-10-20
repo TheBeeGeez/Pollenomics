@@ -79,6 +79,14 @@ typedef struct {
     GLuint vao;
     GLuint vbo;
     GLint resolution_uniform;
+
+    bool show_hive_overlay;
+    bool has_camera;
+    float cam_center_x;
+    float cam_center_y;
+    float cam_zoom;
+    int fb_width;
+    int fb_height;
 } UiState;
 
 static UiState g_ui;
@@ -202,6 +210,160 @@ static float ui_measure_text(const char *text) {
     return max_width;
 }
 
+static void ui_world_to_screen(float wx, float wy, float *sx, float *sy) {
+    float zoom = g_ui.cam_zoom > 0.0f ? g_ui.cam_zoom : 1.0f;
+    float cx = g_ui.cam_center_x;
+    float cy = g_ui.cam_center_y;
+    *sx = (wx - cx) * zoom + 0.5f * (float)g_ui.fb_width;
+    *sy = (wy - cy) * zoom + 0.5f * (float)g_ui.fb_height;
+}
+
+static void ui_draw_hive_segment_horizontal(float ax, float bx, float y_world, UiColor color, float thickness) {
+    if (fabsf(bx - ax) < 1e-4f) {
+        return;
+    }
+    float sx0, sy0, sx1, sy1;
+    ui_world_to_screen(ax, y_world, &sx0, &sy0);
+    ui_world_to_screen(bx, y_world, &sx1, &sy1);
+    float width = fabsf(sx1 - sx0);
+    if (width < 1.0f) {
+        return;
+    }
+    float x = fminf(sx0, sx1);
+    float y = sy0 - 0.5f * thickness;
+    ui_add_rect(x, y, width, thickness, color);
+}
+
+static void ui_draw_hive_segment_vertical(float ay, float by, float x_world, UiColor color, float thickness) {
+    if (fabsf(by - ay) < 1e-4f) {
+        return;
+    }
+    float sx0, sy0, sx1, sy1;
+    ui_world_to_screen(x_world, ay, &sx0, &sy0);
+    ui_world_to_screen(x_world, by, &sx1, &sy1);
+    float height = fabsf(sy1 - sy0);
+    if (height < 1.0f) {
+        return;
+    }
+    float y = fminf(sy0, sy1);
+    float x = sx0 - 0.5f * thickness;
+    ui_add_rect(x, y, thickness, height, color);
+}
+
+static void ui_draw_hive_overlay(void) {
+    if (!g_ui.show_hive_overlay || !g_ui.runtime || !g_ui.has_camera) {
+        return;
+    }
+    if (g_ui.fb_width <= 0 || g_ui.fb_height <= 0) {
+        return;
+    }
+    const Params *p = g_ui.runtime;
+    if (p->hive.rect_w <= 0.0f || p->hive.rect_h <= 0.0f) {
+        return;
+    }
+
+    const float x = p->hive.rect_x;
+    const float y = p->hive.rect_y;
+    const float w = p->hive.rect_w;
+    const float h = p->hive.rect_h;
+
+    const int side = p->hive.entrance_side;
+    const float half_gap = p->hive.entrance_width * 0.5f;
+    float gap_min = 0.0f;
+    float gap_max = 0.0f;
+    if (side == 0 || side == 1) {
+        float gap_center = x + p->hive.entrance_t * w;
+        gap_min = fmaxf(x, gap_center - half_gap);
+        gap_max = fminf(x + w, gap_center + half_gap);
+    } else {
+        float gap_center = y + p->hive.entrance_t * h;
+        gap_min = fmaxf(y, gap_center - half_gap);
+        gap_max = fminf(y + h, gap_center + half_gap);
+    }
+
+    UiColor wall_color = ui_color_rgba(0.95f, 0.75f, 0.15f, 0.9f);
+    UiColor gap_color = ui_color_rgba(0.2f, 0.85f, 0.35f, 0.9f);
+    float thickness = fmaxf(2.0f, g_ui.cam_zoom * 0.8f);
+
+    // Top
+    if (side == 0) {
+        if (gap_min - x > 1e-4f) {
+            ui_draw_hive_segment_horizontal(x, gap_min, y, wall_color, thickness);
+        }
+        if (x + w - gap_max > 1e-4f) {
+            ui_draw_hive_segment_horizontal(gap_max, x + w, y, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_horizontal(gap_min, gap_max, y, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_horizontal(x, x + w, y, wall_color, thickness);
+    }
+
+    // Bottom
+    float y_bottom = y + h;
+    if (side == 1) {
+        if (gap_min - x > 1e-4f) {
+            ui_draw_hive_segment_horizontal(x, gap_min, y_bottom, wall_color, thickness);
+        }
+        if (x + w - gap_max > 1e-4f) {
+            ui_draw_hive_segment_horizontal(gap_max, x + w, y_bottom, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_horizontal(gap_min, gap_max, y_bottom, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_horizontal(x, x + w, y_bottom, wall_color, thickness);
+    }
+
+    // Left
+    if (side == 2) {
+        if (gap_min - y > 1e-4f) {
+            ui_draw_hive_segment_vertical(y, gap_min, x, wall_color, thickness);
+        }
+        if (y + h - gap_max > 1e-4f) {
+            ui_draw_hive_segment_vertical(gap_max, y + h, x, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_vertical(gap_min, gap_max, x, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_vertical(y, y + h, x, wall_color, thickness);
+    }
+
+    // Right
+    float x_right = x + w;
+    if (side == 3) {
+        if (gap_min - y > 1e-4f) {
+            ui_draw_hive_segment_vertical(y, gap_min, x_right, wall_color, thickness);
+        }
+        if (y + h - gap_max > 1e-4f) {
+            ui_draw_hive_segment_vertical(gap_max, y + h, x_right, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_vertical(gap_min, gap_max, x_right, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_vertical(y, y + h, x_right, wall_color, thickness);
+    }
+}
+
+void ui_set_viewport(const RenderCamera *camera, int framebuffer_width, int framebuffer_height) {
+    g_ui.fb_width = framebuffer_width;
+    g_ui.fb_height = framebuffer_height;
+    if (!camera || framebuffer_width <= 0 || framebuffer_height <= 0) {
+        g_ui.has_camera = false;
+        return;
+    }
+    g_ui.cam_center_x = camera->center_world[0];
+    g_ui.cam_center_y = camera->center_world[1];
+    g_ui.cam_zoom = camera->zoom > 0.0f ? camera->zoom : 1.0f;
+    g_ui.has_camera = true;
+}
+
+void ui_enable_hive_overlay(bool enabled) {
+    g_ui.show_hive_overlay = enabled;
+}
 #define GLYPH(ch, r0, r1, r2, r3, r4, r5, r6) \
     { ch, { r0, r1, r2, r3, r4, r5, r6 } }
 
@@ -368,6 +530,9 @@ void ui_init(void) {
     ui_build_glyph_cache();
     g_ui.program = ui_create_shader(UI_VERTEX_SHADER, UI_FRAGMENT_SHADER);
     g_ui.resolution_uniform = glGetUniformLocation(g_ui.program, "u_resolution");
+    g_ui.show_hive_overlay = true;
+    g_ui.has_camera = false;
+    g_ui.cam_zoom = 1.0f;
 
     glGenVertexArrays(1, &g_ui.vao);
     glGenBuffers(1, &g_ui.vbo);
@@ -443,6 +608,8 @@ static void ui_begin_frame(const Input *input) {
     UiColor accent = ui_color_rgba(0.25f, 0.60f, 0.98f, 1.0f);
     UiColor border = ui_color_rgba(0.2f, 0.2f, 0.2f, 1.0f);
     UiColor text = ui_color_rgba(1.0f, 1.0f, 1.0f, 1.0f);
+
+    ui_draw_hive_overlay();
 
     UiRect hamburger = {UI_PANEL_MARGIN, UI_PANEL_MARGIN, UI_HAMBURGER_SIZE, UI_HAMBURGER_SIZE};
     bool hamburger_hover = ui_rect_contains(&hamburger, g_ui.mouse_x, g_ui.mouse_y);
