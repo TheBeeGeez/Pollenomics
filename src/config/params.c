@@ -38,7 +38,7 @@ void params_init_defaults(Params *params) {
     params->bee_color_rgba[1] = 0.10f;
     params->bee_color_rgba[2] = 0.10f;
     params->bee_color_rgba[3] = 1.0f;
-    params->bee_count = 256;
+    params->bee_count = 750000;
     params->world_width_px = (float)params->window_width_px;
     params->world_height_px = (float)params->window_height_px;
     params->rng_seed = UINT64_C(0xBEE);
