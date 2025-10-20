@@ -143,11 +143,12 @@ static void ui_push_vertex(float x, float y, UiColor color) {
     v->a = color.a;
 }
 
-static void ui_add_rect(float x, float y, float w, float h, UiColor color) {
+static size_t ui_add_rect(float x, float y, float w, float h, UiColor color) {
     ui_reserve_vertices(6);
     if (!g_ui.vertices) {
-        return;
+        return g_ui.vert_count;
     }
+    size_t start = g_ui.vert_count;
     ui_push_vertex(x, y, color);
     ui_push_vertex(x + w, y, color);
     ui_push_vertex(x + w, y + h, color);
@@ -155,6 +156,50 @@ static void ui_add_rect(float x, float y, float w, float h, UiColor color) {
     ui_push_vertex(x, y, color);
     ui_push_vertex(x + w, y + h, color);
     ui_push_vertex(x, y + h, color);
+    return start;
+}
+
+static void ui_update_rect(size_t start, float x, float y, float w, float h) {
+    if (!g_ui.vertices || start + 6 > g_ui.vert_count) {
+        return;
+    }
+    UiVertex *verts = &g_ui.vertices[start];
+    verts[0].x = x;
+    verts[0].y = y;
+    verts[1].x = x + w;
+    verts[1].y = y;
+    verts[2].x = x + w;
+    verts[2].y = y + h;
+
+    verts[3].x = x;
+    verts[3].y = y;
+    verts[4].x = x + w;
+    verts[4].y = y + h;
+    verts[5].x = x;
+    verts[5].y = y + h;
+}
+
+static float ui_measure_text(const char *text) {
+    if (!text) {
+        return 0.0f;
+    }
+    float line_width = 0.0f;
+    float max_width = 0.0f;
+    while (*text) {
+        if (*text == '\n') {
+            if (line_width > max_width) {
+                max_width = line_width;
+            }
+            line_width = 0.0f;
+        } else {
+            line_width += UI_CHAR_ADVANCE;
+        }
+        ++text;
+    }
+    if (line_width > max_width) {
+        max_width = line_width;
+    }
+    return max_width;
 }
 
 #define GLYPH(ch, r0, r1, r2, r3, r4, r5, r6) \
@@ -424,12 +469,14 @@ static void ui_begin_frame(const Input *input) {
 
     float cursor_y = panel_rect.y + 18.0f;
     float content_width = UI_PANEL_WIDTH - 40.0f;
+    float panel_max_x = panel_rect.x + UI_PANEL_WIDTH;
 
-    ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, 520.0f, panel_bg);
-    ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, 520.0f, border);
+    size_t panel_bg_start = ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, 520.0f, panel_bg);
+    size_t panel_border_start = ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, 520.0f, border);
 
     float text_x = panel_rect.x + 20.0f;
     ui_draw_text(text_x, cursor_y, "SIM CONTROLS", text);
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("SIM CONTROLS"));
     cursor_y += 24.0f;
 
     typedef struct {
@@ -450,16 +497,24 @@ static void ui_begin_frame(const Input *input) {
         {"SPAWN SPEED STD", 0.0f, 120.0f, 1.0f, &g_ui.runtime->motion_spawn_speed_std, 5},
     };
 
+    sliders[4].min_value = g_ui.runtime->motion_min_speed;
+    sliders[4].max_value = g_ui.runtime->motion_max_speed;
+    if (sliders[4].max_value < sliders[4].min_value) {
+        sliders[4].max_value = sliders[4].min_value;
+    }
+
     float slider_x = text_x;
     float slider_width = content_width;
 
     for (size_t i = 0; i < sizeof(sliders)/sizeof(sliders[0]); ++i) {
         SliderSpec *spec = &sliders[i];
         ui_draw_text(slider_x, cursor_y, spec->label, text);
+        panel_max_x = fmaxf(panel_max_x, slider_x + ui_measure_text(spec->label));
         UiRect slider_rect = {slider_x, cursor_y + 18.0f, slider_width, UI_SLIDER_HEIGHT};
         bool hovered = ui_rect_contains(&slider_rect, g_ui.mouse_x, g_ui.mouse_y);
 
         ui_add_rect(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, ui_color_rgba(0.15f, 0.15f, 0.18f, 0.95f));
+        panel_max_x = fmaxf(panel_max_x, slider_rect.x + slider_rect.w);
 
         float range = spec->max_value - spec->min_value;
         float ratio = (range > 0.0f) ? ((*spec->value - spec->min_value) / range) : 0.0f;
@@ -497,8 +552,22 @@ static void ui_begin_frame(const Input *input) {
         }
 
         char buffer[32];
+        if (spec->value == &g_ui.runtime->motion_spawn_speed_mean) {
+            float min_allowed = g_ui.runtime->motion_min_speed;
+            float max_allowed = g_ui.runtime->motion_max_speed;
+            if (max_allowed < min_allowed) {
+                max_allowed = min_allowed;
+            }
+            *spec->value = ui_clampf(*spec->value, min_allowed, max_allowed);
+        } else if (spec->value == &g_ui.runtime->motion_spawn_speed_std) {
+            if (*spec->value < 0.0f) {
+                *spec->value = 0.0f;
+            }
+        }
         snprintf(buffer, sizeof(buffer), "%.1f", *spec->value);
-        ui_draw_text(slider_rect.x + slider_rect.w + 10.0f, slider_rect.y - 2.0f, buffer, text);
+        float value_x = slider_rect.x + slider_rect.w + 10.0f;
+        ui_draw_text(value_x, slider_rect.y - 2.0f, buffer, text);
+        panel_max_x = fmaxf(panel_max_x, value_x + ui_measure_text(buffer));
         cursor_y += UI_SLIDER_SPACING;
     }
 
@@ -513,6 +582,7 @@ static void ui_begin_frame(const Input *input) {
     }
 
     ui_draw_text(text_x, cursor_y, "SPAWN MODE", text);
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("SPAWN MODE"));
     cursor_y += 20.0f;
     float button_w = (content_width - 10.0f) * 0.5f;
     UiRect uniform_rect = {text_x, cursor_y, button_w, 28.0f};
@@ -523,6 +593,7 @@ static void ui_begin_frame(const Input *input) {
                 uniform_active ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
     ui_add_rect(gaussian_rect.x, gaussian_rect.y, gaussian_rect.w, gaussian_rect.h,
                 gaussian_active ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    panel_max_x = fmaxf(panel_max_x, gaussian_rect.x + gaussian_rect.w);
     ui_draw_text(uniform_rect.x + 8.0f, uniform_rect.y + 6.0f, "UNIFORM", text);
     ui_draw_text(gaussian_rect.x + 8.0f, gaussian_rect.y + 6.0f, "GAUSSIAN", text);
     if (mouse_pressed) {
@@ -535,11 +606,13 @@ static void ui_begin_frame(const Input *input) {
     cursor_y += 40.0f;
 
     ui_draw_text(text_x, cursor_y, "BEE COUNT", text);
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("BEE COUNT"));
     cursor_y += 22.0f;
     UiRect minus_rect = {text_x, cursor_y, 28.0f, 24.0f};
     UiRect plus_rect = {text_x + 120.0f, cursor_y, 28.0f, 24.0f};
     ui_add_rect(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
     ui_add_rect(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    panel_max_x = fmaxf(panel_max_x, plus_rect.x + plus_rect.w);
     ui_draw_text(minus_rect.x + 9.0f, minus_rect.y + 4.0f, "-", text);
     ui_draw_text(plus_rect.x + 7.0f, plus_rect.y + 4.0f, "+", text);
 
@@ -558,9 +631,11 @@ static void ui_begin_frame(const Input *input) {
     char bee_buf[32];
     snprintf(bee_buf, sizeof(bee_buf), "%zu", g_ui.runtime->bee_count);
     ui_draw_text(text_x + 40.0f, cursor_y + 4.0f, bee_buf, text);
+    panel_max_x = fmaxf(panel_max_x, text_x + 40.0f + ui_measure_text(bee_buf));
     cursor_y += 36.0f;
 
     ui_draw_text(text_x, cursor_y, "WORLD SIZE", text);
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("WORLD SIZE"));
     cursor_y += 24.0f;
     UiRect world_minus_w = {text_x, cursor_y, 28.0f, 24.0f};
     UiRect world_plus_w = {text_x + 120.0f, cursor_y, 28.0f, 24.0f};
@@ -571,6 +646,7 @@ static void ui_begin_frame(const Input *input) {
     ui_add_rect(world_plus_w.x, world_plus_w.y, world_plus_w.w, world_plus_w.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
     ui_add_rect(world_minus_h.x, world_minus_h.y, world_minus_h.w, world_minus_h.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
     ui_add_rect(world_plus_h.x, world_plus_h.y, world_plus_h.w, world_plus_h.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    panel_max_x = fmaxf(panel_max_x, fmaxf(world_plus_w.x + world_plus_w.w, world_plus_h.x + world_plus_h.w));
     ui_draw_text(world_minus_w.x + 9.0f, world_minus_w.y + 4.0f, "-", text);
     ui_draw_text(world_plus_w.x + 7.0f, world_plus_w.y + 4.0f, "+", text);
     ui_draw_text(world_minus_h.x + 9.0f, world_minus_h.y + 4.0f, "-", text);
@@ -592,14 +668,17 @@ static void ui_begin_frame(const Input *input) {
     char world_buf[48];
     snprintf(world_buf, sizeof(world_buf), "W %.0f", g_ui.runtime->world_width_px);
     ui_draw_text(text_x + 40.0f, cursor_y + 4.0f, world_buf, text);
+    panel_max_x = fmaxf(panel_max_x, text_x + 40.0f + ui_measure_text(world_buf));
     snprintf(world_buf, sizeof(world_buf), "H %.0f", g_ui.runtime->world_height_px);
     ui_draw_text(text_x + 40.0f, cursor_y + 36.0f, world_buf, text);
+    panel_max_x = fmaxf(panel_max_x, text_x + 40.0f + ui_measure_text(world_buf));
     cursor_y += 72.0f;
 
     UiRect pause_rect = {text_x, cursor_y, (content_width - 10.0f) * 0.5f, 28.0f};
     UiRect step_rect = {text_x + pause_rect.w + 10.0f, cursor_y, pause_rect.w, 28.0f};
     ui_add_rect(pause_rect.x, pause_rect.y, pause_rect.w, pause_rect.h, accent);
     ui_add_rect(step_rect.x, step_rect.y, step_rect.w, step_rect.h, ui_color_rgba(0.3f, 0.3f, 0.35f, 1.0f));
+    panel_max_x = fmaxf(panel_max_x, step_rect.x + step_rect.w);
     ui_draw_text(pause_rect.x + 8.0f, pause_rect.y + 6.0f, g_ui.sim_paused ? "RESUME" : "PAUSE", text);
     ui_draw_text(step_rect.x + 8.0f, step_rect.y + 6.0f, "STEP", text);
     if (mouse_pressed && ui_rect_contains(&pause_rect, g_ui.mouse_x, g_ui.mouse_y)) {
@@ -637,6 +716,7 @@ static void ui_begin_frame(const Input *input) {
     ui_draw_text(apply_rect.x + 8.0f, apply_rect.y + 8.0f, "APPLY", text);
     ui_add_rect(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h, ui_color_rgba(0.25f, 0.25f, 0.30f, 1.0f));
     ui_draw_text(reset_rect.x + 8.0f, reset_rect.y + 8.0f, "RESET", text);
+    panel_max_x = fmaxf(panel_max_x, reset_rect.x + reset_rect.w);
 
     if (mouse_pressed && ui_rect_contains(&apply_rect, g_ui.mouse_x, g_ui.mouse_y) && g_ui.dirty) {
         g_ui.action_apply = true;
@@ -653,9 +733,13 @@ static void ui_begin_frame(const Input *input) {
 
     if (g_ui.reinit_required) {
         ui_draw_text(text_x, reset_rect.y + 40.0f, "REINIT REQUIRED", text);
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("REINIT REQUIRED"));
     }
 
     panel_rect.h = (reset_rect.y + 80.0f) - panel_rect.y;
+    panel_rect.w = fmaxf(UI_PANEL_WIDTH, (panel_max_x - panel_rect.x) + 20.0f);
+    ui_update_rect(panel_bg_start, panel_rect.x, panel_rect.y, panel_rect.w, panel_rect.h);
+    ui_update_rect(panel_border_start, panel_rect.x, panel_rect.y, panel_rect.w, panel_rect.h);
     g_ui.mouse_over_panel = ui_rect_contains(&panel_rect, g_ui.mouse_x, g_ui.mouse_y);
     g_ui.wants_mouse = g_ui.capturing_mouse || g_ui.mouse_over_panel;
     g_ui.wants_keyboard = true;
