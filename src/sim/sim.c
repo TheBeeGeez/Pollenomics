@@ -519,6 +519,114 @@ RenderView sim_build_view(const SimState *state) {
     return view;
 }
 
+void sim_apply_runtime_params(SimState *state, const Params *params) {
+    if (!state || !params) {
+        return;
+    }
+
+    float min_speed = params->motion_min_speed;
+    if (min_speed <= 0.0f) {
+        min_speed = state->min_speed > 0.0f ? state->min_speed : 1.0f;
+    }
+    float max_speed = params->motion_max_speed;
+    if (max_speed < min_speed) {
+        max_speed = min_speed;
+    }
+
+    state->min_speed = min_speed;
+    state->max_speed = max_speed;
+    float jitter_rad = params->motion_jitter_deg_per_sec * (float)M_PI / 180.0f;
+    if (jitter_rad < 0.0f) {
+        jitter_rad = 0.0f;
+    }
+    state->jitter_rad_per_sec = jitter_rad;
+
+    float bounce_margin = params->motion_bounce_margin;
+    if (bounce_margin < 0.0f) {
+        bounce_margin = 0.0f;
+    }
+    state->bounce_margin = bounce_margin;
+    state->spawn_speed_mean = params->motion_spawn_speed_mean;
+    if (state->spawn_speed_mean < 0.0f) {
+        state->spawn_speed_mean = 0.0f;
+    }
+    state->spawn_speed_std = params->motion_spawn_speed_std;
+    if (state->spawn_speed_std < 0.0f) {
+        state->spawn_speed_std = 0.0f;
+    }
+    state->spawn_mode = params->motion_spawn_mode;
+
+    const float world_w = state->world_w;
+    const float world_h = state->world_h;
+
+    for (size_t i = 0; i < state->count; ++i) {
+        float vx = state->vx[i];
+        float vy = state->vy[i];
+        float speed_sq = vx * vx + vy * vy;
+        float heading = state->heading[i];
+        if (speed_sq > 0.0f) {
+            float speed = sqrtf(speed_sq);
+            if (speed > max_speed && max_speed > 0.0f) {
+                float scale = max_speed / speed;
+                vx *= scale;
+                vy *= scale;
+                speed = max_speed;
+            } else if (speed < min_speed) {
+                float scale = min_speed / speed;
+                vx *= scale;
+                vy *= scale;
+                speed = min_speed;
+            }
+            heading = atan2f(vy, vx);
+        } else {
+            if (!isfinite(heading)) {
+                heading = 0.0f;
+            }
+            vx = cosf(heading) * min_speed;
+            vy = sinf(heading) * min_speed;
+        }
+
+        state->vx[i] = vx;
+        state->vy[i] = vy;
+        state->heading[i] = heading;
+
+        float radius = state->radius ? state->radius[i] : state->default_radius;
+        float min_x = radius + state->bounce_margin;
+        float max_x = world_w - radius - state->bounce_margin;
+        if (min_x > max_x) {
+            float mid = world_w * 0.5f;
+            min_x = mid;
+            max_x = mid;
+        }
+        float min_y = radius + state->bounce_margin;
+        float max_y = world_h - radius - state->bounce_margin;
+        if (min_y > max_y) {
+            float mid = world_h * 0.5f;
+            min_y = mid;
+            max_y = mid;
+        }
+
+        float x = state->x[i];
+        float y = state->y[i];
+        if (x < min_x) {
+            x = min_x;
+        } else if (x > max_x) {
+            x = max_x;
+        }
+        if (y < min_y) {
+            y = min_y;
+        } else if (y > max_y) {
+            y = max_y;
+        }
+
+        state->x[i] = x;
+        state->y[i] = y;
+    }
+
+    update_scratch(state);
+    reset_log_stats(state);
+}
+
 void sim_reset(SimState *state, uint64_t seed) {
     if (!state) {
         return;

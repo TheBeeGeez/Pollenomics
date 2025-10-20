@@ -29,6 +29,10 @@ RenderView sim_build_view(const SimState *state);
 void sim_reset(SimState *state, uint64_t seed);
 // Reinitializes the simulation deterministically from the given seed.
 
+void sim_apply_runtime_params(SimState *state, const Params *params);
+// Updates motion-related tunables in-place without reallocating or
+// reseeding. Positions and velocities are clamped to remain valid.
+
 void sim_shutdown(SimState *state);
 // Frees all simulation resources; safe to call on null.
 
