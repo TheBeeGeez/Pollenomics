@@ -188,6 +188,9 @@ void plat_pump(Platform *plat, Input *out_input, Timing *out_timing) {
     int drawable_h = state->drawable_h;
     SDL_GL_GetDrawableSize(state->window, &drawable_w, &drawable_h);
 
+    state->drawable_w = drawable_w;
+    state->drawable_h = drawable_h;
+
     float scale_x = window_w > 0 ? ((float)drawable_w / (float)window_w) : 1.0f;
     float scale_y = window_h > 0 ? ((float)drawable_h / (float)window_h) : 1.0f;
 
@@ -338,3 +341,4 @@ bool plat_poll_resize(Platform *plat, int *out_fb_w, int *out_fb_h) {
     }
     return true;
 }
+

@@ -18,7 +18,7 @@ static float g_default_zoom = 1.0f;
 static float g_default_center_world[2] = {0.0f, 0.0f};
 static int g_fb_width = 0;
 static int g_fb_height = 0;
-static const float g_sim_fixed_dt = 1.0f / 120.0f;
+static float g_sim_fixed_dt = 1.0f / 120.0f;
 static const double g_sim_max_accumulator = 0.25;
 static float clampf(float v, float lo, float hi) {
     if (v < lo) {
@@ -122,6 +122,11 @@ bool app_init(const Params *params) {
     }
 
     g_params = *params;
+    if (g_params.sim_fixed_dt > 0.0f) {
+        g_sim_fixed_dt = g_params.sim_fixed_dt;
+    } else {
+        g_sim_fixed_dt = 1.0f / 120.0f;
+    }
     char err[256];
     if (!params_validate(&g_params, err, sizeof err)) {
         LOG_ERROR("Params validation failed: %s", err);
@@ -319,7 +324,8 @@ void app_frame(void) {
     if (g_sim) {
         view = sim_build_view(g_sim);
     }
-    render_frame(&g_render, &view, &g_camera);
+    render_set_camera(&g_render, &g_camera);
+    render_frame(&g_render, &view);
     plat_swap(&g_platform);
 }
 
@@ -347,3 +353,4 @@ void app_shutdown(void) {
 bool app_should_quit(void) {
     return g_app_should_quit;
 }
+

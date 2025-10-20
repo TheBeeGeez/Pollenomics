@@ -38,9 +38,17 @@ void params_init_defaults(Params *params) {
     params->bee_color_rgba[1] = 0.10f;
     params->bee_color_rgba[2] = 0.10f;
     params->bee_color_rgba[3] = 1.0f;
-    params->bee_count = 750000;
+    params->bee_count = 256;
     params->world_width_px = (float)params->window_width_px;
     params->world_height_px = (float)params->window_height_px;
+    params->sim_fixed_dt = 1.0f / 120.0f;
+    params->motion_min_speed = 10.0f;
+    params->motion_max_speed = 80.0f;
+    params->motion_jitter_deg_per_sec = 15.0f;
+    params->motion_bounce_margin = 0.0f;
+    params->motion_spawn_speed_mean = 40.0f;
+    params->motion_spawn_speed_std = 10.0f;
+    params->motion_spawn_mode = SPAWN_VELOCITY_UNIFORM_DIR;
     params->rng_seed = UINT64_C(0xBEE);
 }
 
@@ -98,6 +106,69 @@ bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
         }
         return false;
     }
+    if (params->sim_fixed_dt <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "sim_fixed_dt (%f) must be > 0", params->sim_fixed_dt);
+        }
+        return false;
+    }
+    if (params->motion_min_speed <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "motion_min_speed (%f) must be > 0", params->motion_min_speed);
+        }
+        return false;
+    }
+    if (params->motion_spawn_speed_mean <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "motion_spawn_speed_mean (%f) must be > 0",
+                     params->motion_spawn_speed_mean);
+        }
+        return false;
+    }
+    if (params->motion_max_speed < params->motion_min_speed) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "motion_max_speed (%f) must be >= motion_min_speed (%f)",
+                     params->motion_max_speed, params->motion_min_speed);
+        }
+        return false;
+    }
+    if (params->motion_jitter_deg_per_sec < 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "motion_jitter_deg_per_sec (%f) must be >= 0",
+                     params->motion_jitter_deg_per_sec);
+        }
+        return false;
+    }
+    if (params->motion_bounce_margin < 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "motion_bounce_margin (%f) must be >= 0",
+                     params->motion_bounce_margin);
+        }
+        return false;
+    }
+    if (params->motion_spawn_mode != SPAWN_VELOCITY_UNIFORM_DIR &&
+        params->motion_spawn_mode != SPAWN_VELOCITY_GAUSSIAN_DIR) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "motion_spawn_mode (%d) must be %d or %d",
+                     params->motion_spawn_mode,
+                     SPAWN_VELOCITY_UNIFORM_DIR,
+                     SPAWN_VELOCITY_GAUSSIAN_DIR);
+        }
+        return false;
+    }
+    if (params->motion_spawn_speed_std < 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "motion_spawn_speed_std (%f) must be >= 0",
+                     params->motion_spawn_speed_std);
+        }
+        return false;
+    }
     for (int i = 0; i < 4; ++i) {
         const float c = params->clear_color_rgba[i];
         if (c < 0.0f || c > 1.0f) {
@@ -134,3 +205,4 @@ bool params_load_from_json(const char *path, Params *out_params,
     LOG_WARN("params_load_from_json is not implemented; using defaults");
     return false;
 }
+

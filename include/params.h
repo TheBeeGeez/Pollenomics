@@ -11,6 +11,11 @@
 // pointers live here; keep it pure configuration data.
 #define PARAMS_MAX_TITLE_CHARS 128
 
+typedef enum SpawnVelocityMode {
+    SPAWN_VELOCITY_UNIFORM_DIR = 0,
+    SPAWN_VELOCITY_GAUSSIAN_DIR = 1,
+} SpawnVelocityMode;
+
 typedef struct Params {
     int window_width_px;
     int window_height_px;
@@ -22,6 +27,14 @@ typedef struct Params {
     size_t bee_count;
     float world_width_px;
     float world_height_px;
+    float sim_fixed_dt;
+    float motion_min_speed;
+    float motion_max_speed;
+    float motion_jitter_deg_per_sec;
+    float motion_bounce_margin;
+    float motion_spawn_speed_mean;
+    float motion_spawn_speed_std;
+    int motion_spawn_mode;
     uint64_t rng_seed;
 } Params;
 

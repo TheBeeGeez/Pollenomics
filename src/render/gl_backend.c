@@ -31,6 +31,8 @@ typedef struct RenderState {
     GLint u_screen;
     GLint u_cam_center;
     GLint u_cam_zoom;
+    float cam_center[2];
+    float cam_zoom;
     size_t instance_capacity;
     size_t instance_buffer_size;
     unsigned char *instance_cpu_buffer;
@@ -282,6 +284,9 @@ bool render_init(Render *render, const Params *params) {
     state->default_radius_px = params->bee_radius_px > 0.0f ? params->bee_radius_px : 1.0f;
     state->fb_width = params->window_width_px;
     state->fb_height = params->window_height_px;
+    state->cam_center[0] = 0.0f;
+    state->cam_center[1] = 0.0f;
+    state->cam_zoom = 1.0f;
     state->instance_capacity = 0;
     state->instance_buffer_size = 0;
     state->instance_cpu_buffer = NULL;
@@ -370,7 +375,23 @@ void render_resize(Render *render, int fb_w, int fb_h) {
     }
 }
 
-void render_frame(Render *render, const RenderView *view, const RenderCamera *camera) {
+void render_set_camera(Render *render, const RenderCamera *camera) {
+    if (!render || !render->state) {
+        return;
+    }
+    RenderState *state = (RenderState *)render->state;
+    if (camera) {
+        state->cam_center[0] = camera->center_world[0];
+        state->cam_center[1] = camera->center_world[1];
+        state->cam_zoom = camera->zoom > 0.0f ? camera->zoom : 1.0f;
+    } else {
+        state->cam_center[0] = 0.0f;
+        state->cam_center[1] = 0.0f;
+        state->cam_zoom = 1.0f;
+    }
+}
+
+void render_frame(Render *render, const RenderView *view) {
     if (!render || !render->state) {
         return;
     }
@@ -395,12 +416,12 @@ void render_frame(Render *render, const RenderView *view, const RenderCamera *ca
 
     pack_instance_data(state, view, instance_count);
 
-    RenderCamera fallback_camera = {{0.0f, 0.0f}, 1.0f};
-    const RenderCamera *cam = camera ? camera : &fallback_camera;
-    float cam_zoom = cam->zoom;
+    float cam_zoom = state->cam_zoom;
     if (cam_zoom <= 0.0f) {
         cam_zoom = 1.0f;
     }
+    float cam_center_x = state->cam_center[0];
+    float cam_center_y = state->cam_center[1];
 
     size_t byte_count = instance_count * (size_t)INSTANCE_STRIDE;
     glBindBuffer(GL_ARRAY_BUFFER, state->instance_vbo);
@@ -410,7 +431,7 @@ void render_frame(Render *render, const RenderView *view, const RenderCamera *ca
 
     glUseProgram(state->program);
     glUniform2f(state->u_screen, (float)state->fb_width, (float)state->fb_height);
-    glUniform2f(state->u_cam_center, cam->center_world[0], cam->center_world[1]);
+    glUniform2f(state->u_cam_center, cam_center_x, cam_center_y);
     glUniform1f(state->u_cam_zoom, cam_zoom);
     glBindVertexArray(state->vao);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)instance_count);

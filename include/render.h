@@ -29,11 +29,15 @@ bool render_init(Render *out, const Params *params);
 void render_resize(Render *render, int fb_w, int fb_h);
 // Notifies render subsystem that the framebuffer size changed.
 
-void render_frame(Render *render, const RenderView *view, const RenderCamera *camera);
-// Issues draw commands for the current frame using the provided view and camera;
-// must not swap buffers.
+void render_set_camera(Render *render, const RenderCamera *camera);
+// Updates the camera parameters used by subsequent render_frame calls.
+
+void render_frame(Render *render, const RenderView *view);
+// Issues draw commands for the current frame using the provided view; must not
+// swap buffers.
 
 void render_shutdown(Render *render);
 // Releases GPU resources; safe to call once after render_init succeeds.
 
 #endif  // RENDER_H
+
