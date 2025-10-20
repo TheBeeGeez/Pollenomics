@@ -9,7 +9,8 @@ bool app_init(const Params *params);
 // Initializes platform first, then render. Returns false if initialization fails.
 
 void app_frame(void);
-// Executes one iteration of the main loop: pump input, render, swap buffers.
+// Executes one iteration of the main loop: pump input, run fixed-step sim,
+// render, and swap buffers.
 
 void app_shutdown(void);
 // Shuts down render before platform; safe to call once after app_init.

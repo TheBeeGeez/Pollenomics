@@ -8,7 +8,15 @@ find_package(glad CONFIG REQUIRED)
 
 add_executable(bee_sim
   src/main.c
+  src/app/app.c
+  src/config/params.c
+  src/sim/sim.c
+  src/platform/sdl_io.c
+  src/render/gl_backend.c
+  src/util/log.c
 )
+
+target_include_directories(bee_sim PRIVATE include)
 
 target_link_libraries(bee_sim PRIVATE
   glad::glad
