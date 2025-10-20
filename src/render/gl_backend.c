@@ -29,6 +29,8 @@ typedef struct RenderState {
     GLuint quad_vbo;
     GLuint instance_vbo;
     GLint u_screen;
+    GLint u_cam_center;
+    GLint u_cam_zoom;
     size_t instance_capacity;
     size_t instance_buffer_size;
     unsigned char *instance_cpu_buffer;
@@ -95,20 +97,24 @@ static GLuint link_program(GLuint vs, GLuint fs, char *log_buf, size_t log_cap) 
 static const char *kVertexShaderSrc =
     "#version 330 core\n"
     "layout(location=0) in vec2 a_pos;\n"
-    "layout(location=1) in vec2 a_center_px;\n"
-    "layout(location=2) in float a_radius_px;\n"
+    "layout(location=1) in vec2 a_center_world;\n"
+    "layout(location=2) in float a_radius_world;\n"
     "layout(location=3) in vec4 a_color_rgba;\n"
     "uniform vec2 u_screen;\n"
+    "uniform vec2 u_cam_center;\n"
+    "uniform float u_cam_zoom;\n"
     "out vec2 v_px;\n"
     "out vec2 v_center_px;\n"
     "out float v_radius_px;\n"
     "out vec4 v_color_rgba;\n"
     "void main() {\n"
-    "    vec2 local = (a_pos * 2.0 - 1.0) * a_radius_px;\n"
-    "    vec2 px = a_center_px + local;\n"
+    "    float radius_px = a_radius_world * u_cam_zoom;\n"
+    "    vec2 center_px = (a_center_world - u_cam_center) * u_cam_zoom + 0.5 * u_screen;\n"
+    "    vec2 offset_px = (a_pos * 2.0 - 1.0) * radius_px;\n"
+    "    vec2 px = center_px + offset_px;\n"
     "    v_px = px;\n"
-    "    v_center_px = a_center_px;\n"
-    "    v_radius_px = a_radius_px;\n"
+    "    v_center_px = center_px;\n"
+    "    v_radius_px = radius_px;\n"
     "    v_color_rgba = a_color_rgba;\n"
     "    vec2 ndc;\n"
     "    ndc.x = (px.x / u_screen.x) * 2.0 - 1.0;\n"
@@ -330,10 +336,12 @@ bool render_init(Render *render, const Params *params) {
 
     glUseProgram(state->program);
     state->u_screen = glGetUniformLocation(state->program, "u_screen");
+    state->u_cam_center = glGetUniformLocation(state->program, "u_cam_center");
+    state->u_cam_zoom = glGetUniformLocation(state->program, "u_cam_zoom");
     glUseProgram(0);
 
-    if (state->u_screen < 0) {
-        LOG_WARN("render: u_screen uniform missing; rendering may be incorrect");
+    if (state->u_screen < 0 || state->u_cam_center < 0 || state->u_cam_zoom < 0) {
+        LOG_WARN("render: missing camera uniforms; rendering may be incorrect");
     }
 
     glDisable(GL_DEPTH_TEST);
@@ -362,7 +370,7 @@ void render_resize(Render *render, int fb_w, int fb_h) {
     }
 }
 
-void render_frame(Render *render, const RenderView *view) {
+void render_frame(Render *render, const RenderView *view, const RenderCamera *camera) {
     if (!render || !render->state) {
         return;
     }
@@ -387,6 +395,13 @@ void render_frame(Render *render, const RenderView *view) {
 
     pack_instance_data(state, view, instance_count);
 
+    RenderCamera fallback_camera = {{0.0f, 0.0f}, 1.0f};
+    const RenderCamera *cam = camera ? camera : &fallback_camera;
+    float cam_zoom = cam->zoom;
+    if (cam_zoom <= 0.0f) {
+        cam_zoom = 1.0f;
+    }
+
     size_t byte_count = instance_count * (size_t)INSTANCE_STRIDE;
     glBindBuffer(GL_ARRAY_BUFFER, state->instance_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)state->instance_buffer_size, NULL, GL_STREAM_DRAW);
@@ -395,6 +410,8 @@ void render_frame(Render *render, const RenderView *view) {
 
     glUseProgram(state->program);
     glUniform2f(state->u_screen, (float)state->fb_width, (float)state->fb_height);
+    glUniform2f(state->u_cam_center, cam->center_world[0], cam->center_world[1]);
+    glUniform1f(state->u_cam_zoom, cam_zoom);
     glBindVertexArray(state->vao);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)instance_count);
     glBindVertexArray(0);

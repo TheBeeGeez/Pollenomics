@@ -11,6 +11,11 @@ typedef struct Render {
     void *state;
 } Render;  // Opaque render subsystem state pointer bag.
 
+typedef struct RenderCamera {
+    float center_world[2];
+    float zoom;
+} RenderCamera;
+
 typedef struct RenderView {
     const float *positions_xy;     // Interleaved XY array, length = count * 2.
     const float *radii_px;         // Radius per element.
@@ -24,9 +29,9 @@ bool render_init(Render *out, const Params *params);
 void render_resize(Render *render, int fb_w, int fb_h);
 // Notifies render subsystem that the framebuffer size changed.
 
-void render_frame(Render *render, const RenderView *view);
-// Issues draw commands for the current frame using the provided view; must not
-// swap buffers.
+void render_frame(Render *render, const RenderView *view, const RenderCamera *camera);
+// Issues draw commands for the current frame using the provided view and camera;
+// must not swap buffers.
 
 void render_shutdown(Render *render);
 // Releases GPU resources; safe to call once after render_init succeeds.

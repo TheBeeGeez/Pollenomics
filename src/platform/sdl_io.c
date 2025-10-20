@@ -19,6 +19,14 @@ typedef struct PlatformState {
     bool prev_key_escape_down;
     bool prev_key_space_down;
     bool prev_key_period_down;
+    bool prev_key_plus_down;
+    bool prev_key_minus_down;
+    bool prev_key_reset_down;
+    bool prev_mouse_left_down;
+    bool prev_mouse_right_down;
+    float prev_mouse_x_px;
+    float prev_mouse_y_px;
+    bool mouse_initialized;
 } PlatformState;
 
 static void platform_log_gl_info(bool vsync_requested) {
@@ -141,6 +149,9 @@ bool plat_init(Platform *plat, const Params *params) {
     state->ticks_prev = SDL_GetPerformanceCounter();
     state->inv_freq = 1.0 / (double)SDL_GetPerformanceFrequency();
     state->vsync_enabled = SDL_GL_GetSwapInterval() > 0;
+    state->drawable_w = params->window_width_px;
+    state->drawable_h = params->window_height_px;
+    state->mouse_initialized = false;
     plat->state = state;
 
     platform_log_gl_info(params->vsync_on);
@@ -155,29 +166,76 @@ void plat_pump(Platform *plat, Input *out_input, Timing *out_timing) {
     PlatformState *state = (PlatformState *)plat->state;
 
     bool quit_requested = false;
+    int wheel_y = 0;
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
             case SDL_QUIT:
                 quit_requested = true;
                 break;
+            case SDL_MOUSEWHEEL:
+                wheel_y += event.wheel.y;
+                break;
             default:
                 break;
         }
     }
 
+    int window_w = 0;
+    int window_h = 0;
+    SDL_GetWindowSize(state->window, &window_w, &window_h);
+    int drawable_w = state->drawable_w;
+    int drawable_h = state->drawable_h;
+    SDL_GL_GetDrawableSize(state->window, &drawable_w, &drawable_h);
+
+    float scale_x = window_w > 0 ? ((float)drawable_w / (float)window_w) : 1.0f;
+    float scale_y = window_h > 0 ? ((float)drawable_h / (float)window_h) : 1.0f;
+
+    int mouse_x = 0;
+    int mouse_y = 0;
+    Uint32 mouse_buttons = SDL_GetMouseState(&mouse_x, &mouse_y);
+    float mouse_x_px = (float)mouse_x * scale_x;
+    float mouse_y_px = (float)mouse_y * scale_y;
+
+    if (!state->mouse_initialized) {
+        state->prev_mouse_x_px = mouse_x_px;
+        state->prev_mouse_y_px = mouse_y_px;
+        state->mouse_initialized = true;
+    }
+
+    float mouse_dx_px = mouse_x_px - state->prev_mouse_x_px;
+    float mouse_dy_px = mouse_y_px - state->prev_mouse_y_px;
+
+    bool mouse_left_down = (mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
+    bool mouse_right_down = (mouse_buttons & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
+    bool mouse_left_pressed = mouse_left_down && !state->prev_mouse_left_down;
+    bool mouse_right_pressed = mouse_right_down && !state->prev_mouse_right_down;
+
     const Uint8 *keyboard = SDL_GetKeyboardState(NULL);
     bool escape_down = keyboard ? keyboard[SDL_SCANCODE_ESCAPE] != 0 : false;
     bool space_down = keyboard ? keyboard[SDL_SCANCODE_SPACE] != 0 : false;
     bool period_down = keyboard ? keyboard[SDL_SCANCODE_PERIOD] != 0 : false;
+    bool plus_down = keyboard ? (keyboard[SDL_SCANCODE_EQUALS] || keyboard[SDL_SCANCODE_KP_PLUS]) : false;
+    bool minus_down = keyboard ? (keyboard[SDL_SCANCODE_MINUS] || keyboard[SDL_SCANCODE_KP_MINUS]) : false;
+    bool reset_down = keyboard ? (keyboard[SDL_SCANCODE_0] || keyboard[SDL_SCANCODE_KP_0]) : false;
 
     bool escape_pressed = escape_down && !state->prev_key_escape_down;
     bool space_pressed = space_down && !state->prev_key_space_down;
     bool period_pressed = period_down && !state->prev_key_period_down;
+    bool plus_pressed = plus_down && !state->prev_key_plus_down;
+    bool minus_pressed = minus_down && !state->prev_key_minus_down;
+    bool reset_pressed = reset_down && !state->prev_key_reset_down;
 
     state->prev_key_escape_down = escape_down;
     state->prev_key_space_down = space_down;
     state->prev_key_period_down = period_down;
+    state->prev_key_plus_down = plus_down;
+    state->prev_key_minus_down = minus_down;
+    state->prev_key_reset_down = reset_down;
+    state->prev_mouse_left_down = mouse_left_down;
+    state->prev_mouse_right_down = mouse_right_down;
+    state->prev_mouse_x_px = mouse_x_px;
+    state->prev_mouse_y_px = mouse_y_px;
 
     Input input = {0};
     input.key_escape_down = escape_down;
@@ -186,6 +244,24 @@ void plat_pump(Platform *plat, Input *out_input, Timing *out_timing) {
     input.key_escape_pressed = escape_pressed;
     input.key_space_pressed = space_pressed;
     input.key_period_pressed = period_pressed;
+    input.key_plus_down = plus_down;
+    input.key_minus_down = minus_down;
+    input.key_plus_pressed = plus_pressed;
+    input.key_minus_pressed = minus_pressed;
+    input.key_reset_pressed = reset_pressed;
+    input.key_w_down = keyboard ? keyboard[SDL_SCANCODE_W] != 0 : false;
+    input.key_a_down = keyboard ? keyboard[SDL_SCANCODE_A] != 0 : false;
+    input.key_s_down = keyboard ? keyboard[SDL_SCANCODE_S] != 0 : false;
+    input.key_d_down = keyboard ? keyboard[SDL_SCANCODE_D] != 0 : false;
+    input.mouse_x_px = mouse_x_px;
+    input.mouse_y_px = mouse_y_px;
+    input.mouse_dx_px = mouse_dx_px;
+    input.mouse_dy_px = mouse_dy_px;
+    input.mouse_left_down = mouse_left_down;
+    input.mouse_right_down = mouse_right_down;
+    input.mouse_left_pressed = mouse_left_pressed;
+    input.mouse_right_pressed = mouse_right_pressed;
+    input.wheel_y = wheel_y;
     input.quit_requested = quit_requested || escape_pressed;
 
     Uint64 now_ticks = SDL_GetPerformanceCounter();

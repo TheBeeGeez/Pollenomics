@@ -1,8 +1,10 @@
 #include "app.h"
+#include <math.h>
 #include "params.h"
 #include "platform.h"
 #include "render.h"
 #include "sim.h"
+
 #include "util/log.h"
 
 static Platform g_platform = {0};
@@ -11,8 +13,94 @@ static Params g_params = {0};
 static SimState *g_sim = NULL;
 static bool g_app_initialized = false;
 static bool g_app_should_quit = false;
+static RenderCamera g_camera = {{0.0f, 0.0f}, 1.0f};
+static float g_default_zoom = 1.0f;
+static float g_default_center_world[2] = {0.0f, 0.0f};
+static int g_fb_width = 0;
+static int g_fb_height = 0;
 static const float g_sim_fixed_dt = 1.0f / 120.0f;
 static const double g_sim_max_accumulator = 0.25;
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+static void app_reset_camera(void) {
+    g_camera.center_world[0] = g_default_center_world[0];
+    g_camera.center_world[1] = g_default_center_world[1];
+    g_camera.zoom = g_default_zoom;
+}
+
+static void app_update_camera(const Input *input, float dt_sec) {
+    if (!input || g_fb_width <= 0 || g_fb_height <= 0) {
+        return;
+    }
+
+    int zoom_steps = input->wheel_y;
+    if (input->key_plus_pressed) {
+        ++zoom_steps;
+    }
+    if (input->key_minus_pressed) {
+        --zoom_steps;
+    }
+
+    const float zoom_step_ratio = 0.1f;
+    const float zoom_min = 0.05f;
+    const float zoom_max = 20.0f;
+    if (zoom_steps != 0) {
+        float zoom_multiplier = powf(1.0f + zoom_step_ratio, (float)zoom_steps);
+        float zoom_before = g_camera.zoom;
+        float zoom_after = clampf(zoom_before * zoom_multiplier, zoom_min, zoom_max);
+        if (zoom_after != zoom_before) {
+            float cursor_x = input->mouse_x_px;
+            float cursor_y = input->mouse_y_px;
+            float half_w = 0.5f * (float)g_fb_width;
+            float half_h = 0.5f * (float)g_fb_height;
+            float dx_px = cursor_x - half_w;
+            float dy_px = cursor_y - half_h;
+            float world_x = g_camera.center_world[0] + dx_px / zoom_before;
+            float world_y = g_camera.center_world[1] + dy_px / zoom_before;
+            g_camera.zoom = zoom_after;
+            g_camera.center_world[0] = world_x - dx_px / zoom_after;
+            g_camera.center_world[1] = world_y - dy_px / zoom_after;
+        }
+    }
+
+    if (input->key_reset_pressed) {
+        app_reset_camera();
+    }
+
+    if (input->mouse_right_down) {
+        g_camera.center_world[0] -= input->mouse_dx_px / g_camera.zoom;
+        g_camera.center_world[1] -= input->mouse_dy_px / g_camera.zoom;
+    }
+
+    const float pan_speed_px_per_sec = 600.0f;
+    float keyboard_dx_px = 0.0f;
+    float keyboard_dy_px = 0.0f;
+    if (input->key_d_down) {
+        keyboard_dx_px += pan_speed_px_per_sec * dt_sec;
+    }
+    if (input->key_a_down) {
+        keyboard_dx_px -= pan_speed_px_per_sec * dt_sec;
+    }
+    if (input->key_s_down) {
+        keyboard_dy_px += pan_speed_px_per_sec * dt_sec;
+    }
+    if (input->key_w_down) {
+        keyboard_dy_px -= pan_speed_px_per_sec * dt_sec;
+    }
+    if (keyboard_dx_px != 0.0f || keyboard_dy_px != 0.0f) {
+        g_camera.center_world[0] += keyboard_dx_px / g_camera.zoom;
+        g_camera.center_world[1] += keyboard_dy_px / g_camera.zoom;
+    }
+}
+
 static double g_sim_accumulator_sec = 0.0;
 static bool g_sim_paused = false;
 static double g_log_accumulator_sec = 0.0;
@@ -89,6 +177,36 @@ bool app_init(const Params *params) {
     }
     render_resize(&g_render, init_fb_w, init_fb_h);
 
+    g_fb_width = init_fb_w > 0 ? init_fb_w : g_params.window_width_px;
+    g_fb_height = init_fb_h > 0 ? init_fb_h : g_params.window_height_px;
+    if (g_fb_width <= 0) {
+        g_fb_width = g_params.window_width_px;
+    }
+    if (g_fb_height <= 0) {
+        g_fb_height = g_params.window_height_px;
+    }
+    float world_w = g_params.world_width_px > 0.0f ? g_params.world_width_px : (float)g_fb_width;
+    float world_h = g_params.world_height_px > 0.0f ? g_params.world_height_px : (float)g_fb_height;
+    g_default_center_world[0] = world_w * 0.5f;
+    g_default_center_world[1] = world_h * 0.5f;
+    if (world_w <= 0.0f) {
+        g_default_center_world[0] = 0.0f;
+    }
+    if (world_h <= 0.0f) {
+        g_default_center_world[1] = 0.0f;
+    }
+    if (world_w > 0.0f && world_h > 0.0f && g_fb_width > 0 && g_fb_height > 0) {
+        float fit_x = (float)g_fb_width / world_w;
+        float fit_y = (float)g_fb_height / world_h;
+        g_default_zoom = fit_x < fit_y ? fit_x : fit_y;
+    } else {
+        g_default_zoom = 1.0f;
+    }
+    if (g_default_zoom <= 0.0f) {
+        g_default_zoom = 1.0f;
+    }
+    app_reset_camera();
+
     g_sim_accumulator_sec = 0.0;
     g_sim_paused = false;
     g_log_accumulator_sec = 0.0;
@@ -114,6 +232,8 @@ void app_frame(void) {
     if (input.quit_requested) {
         g_app_should_quit = true;
     }
+
+    app_update_camera(&input, timing.dt_sec);
 
     if (input.key_space_pressed) {
         g_sim_paused = !g_sim_paused;
@@ -179,13 +299,27 @@ void app_frame(void) {
     if (plat_poll_resize(&g_platform, &fb_w, &fb_h)) {
         LOG_INFO("Framebuffer resized to %dx%d", fb_w, fb_h);
         render_resize(&g_render, fb_w, fb_h);
+        if (fb_w > 0) {
+            g_fb_width = fb_w;
+        }
+        if (fb_h > 0) {
+            g_fb_height = fb_h;
+        }
+        if (g_params.world_width_px > 0.0f && g_params.world_height_px > 0.0f && g_fb_width > 0 && g_fb_height > 0) {
+            float fit_x = (float)g_fb_width / g_params.world_width_px;
+            float fit_y = (float)g_fb_height / g_params.world_height_px;
+            float new_default_zoom = fit_x < fit_y ? fit_x : fit_y;
+            if (new_default_zoom > 0.0f) {
+                g_default_zoom = new_default_zoom;
+            }
+        }
     }
 
     RenderView view = {0};
     if (g_sim) {
         view = sim_build_view(g_sim);
     }
-    render_frame(&g_render, &view);
+    render_frame(&g_render, &view, &g_camera);
     plat_swap(&g_platform);
 }
 
@@ -207,6 +341,7 @@ void app_shutdown(void) {
     g_log_accumulator_sec = 0.0;
     g_log_frame_counter = 0;
     g_log_tick_counter = 0;
+    app_reset_camera();
 }
 
 bool app_should_quit(void) {

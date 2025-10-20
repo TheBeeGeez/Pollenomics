@@ -18,6 +18,24 @@ typedef struct Input {
     bool key_escape_pressed;
     bool key_space_pressed;
     bool key_period_pressed;
+    bool key_plus_pressed;
+    bool key_minus_pressed;
+    bool key_plus_down;
+    bool key_minus_down;
+    bool key_w_down;
+    bool key_a_down;
+    bool key_s_down;
+    bool key_d_down;
+    bool key_reset_pressed;
+    float mouse_x_px;
+    float mouse_y_px;
+    float mouse_dx_px;
+    float mouse_dy_px;
+    bool mouse_left_down;
+    bool mouse_right_down;
+    bool mouse_left_pressed;
+    bool mouse_right_pressed;
+    int wheel_y;
 } Input;
 
 typedef struct Timing {
