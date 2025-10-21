@@ -11,109 +11,9 @@
 
 #include "util/log.h"
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-#define TWO_PI (2.0f * (float)M_PI)
-#define SIM_MAX_FLOWER_PATCHES 8
-
-typedef struct HiveSegment {
-    float ax;
-    float ay;
-    float bx;
-    float by;
-    float nx;
-    float ny;
-} HiveSegment;
-
-typedef struct FlowerPatch {
-    float x;
-    float y;
-    float radius;
-    float quality;
-    float stock;
-    float capacity;
-    float replenish_rate;
-    float initial_stock;
-} FlowerPatch;
-
-typedef struct SimState {
-    size_t count;
-    size_t capacity;
-    uint64_t seed;
-    float world_w;
-    float world_h;
-    float default_radius;
-    float default_color[4];
-    float min_speed;
-    float max_speed;
-    float jitter_rad_per_sec;
-    float bounce_margin;
-    float spawn_speed_mean;
-    float spawn_speed_std;
-    int spawn_mode;
-    float *x;
-    float *y;
-    float *vx;
-    float *vy;
-    float *heading;
-    float *radius;
-    uint32_t *color_rgba;
-    float *scratch_xy;
-    float *age_days;
-    float *t_state;
-    float *energy;
-    float *load_nectar;
-    float *target_pos_x;
-    float *target_pos_y;
-    int32_t *target_id;
-    int16_t *topic_id;
-    uint8_t *topic_confidence;
-    uint8_t *role;
-    uint8_t *mode;
-    uint8_t *intent;
-    float *capacity_uL;
-    float *harvest_rate_uLps;
-    uint8_t *inside_hive_flag;
-    uint64_t rng_state;
-    double log_accum_sec;
-    uint64_t log_bounce_count;
-    uint64_t log_sample_count;
-    double log_speed_sum;
-    double log_speed_min;
-    double log_speed_max;
-
-    // Hive collision data.
-    int hive_enabled;
-    float hive_rect_x;
-    float hive_rect_y;
-    float hive_rect_w;
-    float hive_rect_h;
-    int hive_entrance_side;
-    float hive_entrance_t;
-    float hive_entrance_width;
-    float hive_restitution;
-    float hive_tangent_damp;
-    int hive_max_iters;
-    float hive_safety_margin;
-    HiveSegment hive_segments[8];
-    size_t hive_segment_count;
-    size_t patch_count;
-    FlowerPatch patches[SIM_MAX_FLOWER_PATCHES];
-    float bee_capacity_uL;
-    float bee_harvest_rate_uLps;
-    float bee_unload_rate_uLps;
-    float bee_rest_recovery_per_s;
-    float bee_speed_mps;
-    float bee_seek_accel;
-    float bee_arrive_tol_world;
-    float patch_positions_xy[SIM_MAX_FLOWER_PATCHES * 2];
-    float patch_radii_px[SIM_MAX_FLOWER_PATCHES];
-    uint32_t patch_fill_rgba[SIM_MAX_FLOWER_PATCHES];
-    float patch_ring_radii_px[SIM_MAX_FLOWER_PATCHES];
-    uint32_t patch_ring_rgba[SIM_MAX_FLOWER_PATCHES];
-} SimState;
+#include "sim_internal.h"
+#include "hive.h"
+#include "plants.h"
 
 static void *alloc_aligned(size_t bytes) {
     if (bytes == 0) {
@@ -149,16 +49,6 @@ static float clamp_positive(float value, float min_value) {
     return value < min_value ? min_value : value;
 }
 
-static float clampf(float v, float lo, float hi) {
-    if (v < lo) {
-        return lo;
-    }
-    if (v > hi) {
-        return hi;
-    }
-    return v;
-}
-
 static uint32_t make_color(float r, float g, float b, float a) {
     uint32_t ri = (uint32_t)(r * 255.0f + 0.5f);
     uint32_t gi = (uint32_t)(g * 255.0f + 0.5f);
@@ -184,24 +74,6 @@ static uint32_t bee_mode_color(uint8_t mode) {
     }
 }
 
-static uint64_t xorshift64(uint64_t *state) {
-    uint64_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    return x;
-}
-
-static float rand_uniform01(uint64_t *state) {
-    uint64_t x = xorshift64(state);
-    return (float)((x >> 11) * (1.0 / 9007199254740992.0));
-}
-
-static float rand_symmetric(uint64_t *state) {
-    return rand_uniform01(state) * 2.0f - 1.0f;
-}
-
 static float rand_angle(uint64_t *state) {
     return rand_uniform01(state) * TWO_PI - (float)M_PI;
 }
@@ -224,229 +96,6 @@ static float wrap_angle(float angle) {
         angle += TWO_PI;
     }
     return angle - (float)M_PI;
-}
-
-static void hive_clear_segments(SimState *state) {
-    if (!state) {
-        return;
-    }
-    state->hive_segment_count = 0;
-}
-
-static void hive_add_segment(SimState *state,
-                             float ax,
-                             float ay,
-                             float bx,
-                             float by,
-                             float nx,
-                             float ny) {
-    if (!state) {
-        return;
-    }
-    float dx = bx - ax;
-    float dy = by - ay;
-    float len_sq = dx * dx + dy * dy;
-    if (len_sq < 1e-6f) {
-        return;
-    }
-    if (state->hive_segment_count >= sizeof(state->hive_segments) / sizeof(state->hive_segments[0])) {
-        return;
-    }
-    float n_len = sqrtf(nx * nx + ny * ny);
-    if (n_len > 0.0f) {
-        nx /= n_len;
-        ny /= n_len;
-    } else {
-        nx = 0.0f;
-        ny = -1.0f;
-    }
-    HiveSegment *seg = &state->hive_segments[state->hive_segment_count++];
-    seg->ax = ax;
-    seg->ay = ay;
-    seg->bx = bx;
-    seg->by = by;
-    seg->nx = nx;
-    seg->ny = ny;
-}
-
-static void sim_build_hive_segments(SimState *state) {
-    hive_clear_segments(state);
-    if (!state) {
-        return;
-    }
-    if (state->hive_rect_w <= 0.0f || state->hive_rect_h <= 0.0f) {
-        state->hive_enabled = 0;
-        return;
-    }
-    state->hive_enabled = 1;
-
-    float x = state->hive_rect_x;
-    float y = state->hive_rect_y;
-    float w = state->hive_rect_w;
-    float h = state->hive_rect_h;
-    int side = state->hive_entrance_side;
-
-    float gap_half = state->hive_entrance_width * 0.5f;
-    float gap_min = 0.0f;
-    float gap_max = 0.0f;
-
-    if (side == 0 || side == 1) {
-        float side_len = w;
-        float gap_center = x + state->hive_entrance_t * side_len;
-        gap_min = fmaxf(x, gap_center - gap_half);
-        gap_max = fminf(x + w, gap_center + gap_half);
-    } else {
-        float side_len = h;
-        float gap_center = y + state->hive_entrance_t * side_len;
-        gap_min = fmaxf(y, gap_center - gap_half);
-        gap_max = fminf(y + h, gap_center + gap_half);
-    }
-
-    // Top side (0).
-    if (side == 0) {
-        if (gap_min > x) {
-            hive_add_segment(state, x, y, gap_min, y, 0.0f, -1.0f);
-        }
-        if (gap_max < x + w) {
-            hive_add_segment(state, gap_max, y, x + w, y, 0.0f, -1.0f);
-        }
-    } else {
-        hive_add_segment(state, x, y, x + w, y, 0.0f, -1.0f);
-    }
-
-    // Bottom side (1).
-    if (side == 1) {
-        float yb = y + h;
-        if (gap_min > x) {
-            hive_add_segment(state, x, yb, gap_min, yb, 0.0f, 1.0f);
-        }
-        if (gap_max < x + w) {
-            hive_add_segment(state, gap_max, yb, x + w, yb, 0.0f, 1.0f);
-        }
-    } else {
-        hive_add_segment(state, x, y + h, x + w, y + h, 0.0f, 1.0f);
-    }
-
-    // Left side (2).
-    if (side == 2) {
-        if (gap_min > y) {
-            hive_add_segment(state, x, y, x, gap_min, -1.0f, 0.0f);
-        }
-        if (gap_max < y + h) {
-            hive_add_segment(state, x, gap_max, x, y + h, -1.0f, 0.0f);
-        }
-    } else {
-        hive_add_segment(state, x, y, x, y + h, -1.0f, 0.0f);
-    }
-
-    // Right side (3).
-    if (side == 3) {
-        float xr = x + w;
-        if (gap_min > y) {
-            hive_add_segment(state, xr, y, xr, gap_min, 1.0f, 0.0f);
-        }
-        if (gap_max < y + h) {
-            hive_add_segment(state, xr, gap_max, xr, y + h, 1.0f, 0.0f);
-        }
-    } else {
-        hive_add_segment(state, x + w, y, x + w, y + h, 1.0f, 0.0f);
-    }
-}
-
-static int hive_resolve_segment(const SimState *state,
-                                const HiveSegment *seg,
-                                float radius,
-                                float *px,
-                                float *py,
-                                float *vx,
-                                float *vy) {
-    float ax = seg->ax;
-    float ay = seg->ay;
-    float bx = seg->bx;
-    float by = seg->by;
-
-    float abx = bx - ax;
-    float aby = by - ay;
-    float ab_len_sq = abx * abx + aby * aby;
-    if (ab_len_sq <= 1e-8f) {
-        return 0;
-    }
-
-    float apx = *px - ax;
-    float apy = *py - ay;
-    float t = (apx * abx + apy * aby) / ab_len_sq;
-    t = clampf(t, 0.0f, 1.0f);
-    float cx = ax + abx * t;
-    float cy = ay + aby * t;
-
-    float rx = *px - cx;
-    float ry = *py - cy;
-    float dist_sq = rx * rx + ry * ry;
-    float radius_sq = radius * radius;
-
-    if (dist_sq >= radius_sq) {
-        return 0;
-    }
-
-    float dist = sqrtf(dist_sq);
-    float nx;
-    float ny;
-    if (dist > 1e-6f) {
-        nx = rx / dist;
-        ny = ry / dist;
-    } else {
-        nx = seg->nx;
-        ny = seg->ny;
-        float n_len = sqrtf(nx * nx + ny * ny);
-        if (n_len <= 1e-6f) {
-            nx = 0.0f;
-            ny = -1.0f;
-        } else {
-            nx /= n_len;
-            ny /= n_len;
-        }
-    }
-
-    float penetration = radius - dist;
-    if (penetration < 0.0f) {
-        return 0;
-    }
-    penetration += state->hive_safety_margin;
-    *px += nx * penetration;
-    *py += ny * penetration;
-
-    float v_normal = (*vx) * nx + (*vy) * ny;
-    float vt_x = *vx - v_normal * nx;
-    float vt_y = *vy - v_normal * ny;
-
-    float new_vn = -state->hive_restitution * v_normal;
-    float new_vt_x = state->hive_tangent_damp * vt_x;
-    float new_vt_y = state->hive_tangent_damp * vt_y;
-
-    *vx = new_vn * nx + new_vt_x;
-    *vy = new_vn * ny + new_vt_y;
-    return 1;
-}
-
-static void hive_resolve_disc(const SimState *state,
-                              float radius,
-                              float *x,
-                              float *y,
-                              float *vx,
-                              float *vy) {
-    if (!state || !state->hive_enabled || state->hive_segment_count == 0) {
-        return;
-    }
-    int max_iters = state->hive_max_iters > 0 ? state->hive_max_iters : 1;
-    for (int iter = 0; iter < max_iters; ++iter) {
-        int collided = 0;
-        for (size_t si = 0; si < state->hive_segment_count; ++si) {
-            collided |= hive_resolve_segment(state, &state->hive_segments[si], radius, x, y, vx, vy);
-        }
-        if (!collided) {
-            break;
-        }
-    }
 }
 
 static void update_scratch(SimState *state) {
@@ -493,7 +142,7 @@ static void configure_from_params(SimState *state, const Params *params) {
     state->bee_speed_mps = params->bee.speed_mps;
     state->bee_seek_accel = params->bee.seek_accel;
     state->bee_arrive_tol_world = params->bee.arrive_tol_world;
-    sim_build_hive_segments(state);
+    hive_build_segments(state);
 
     if (state->capacity_uL && state->harvest_rate_uLps) {
         for (size_t i = 0; i < state->count; ++i) {
@@ -515,245 +164,6 @@ static void reset_log_stats(SimState *state) {
     state->log_speed_max = 0.0;
 }
 
-static bool patch_location_valid(const SimState *state,
-                                 float x,
-                                 float y,
-                                 float radius,
-                                 size_t existing_count) {
-    if (!state) {
-        return false;
-    }
-    const float edge_margin = radius + state->default_radius * 4.0f;
-    if (x - radius < edge_margin || x + radius > state->world_w - edge_margin ||
-        y - radius < edge_margin || y + radius > state->world_h - edge_margin) {
-        return false;
-    }
-    if (state->hive_rect_w > 0.0f && state->hive_rect_h > 0.0f) {
-        float hx0 = state->hive_rect_x - edge_margin;
-        float hy0 = state->hive_rect_y - edge_margin;
-        float hx1 = state->hive_rect_x + state->hive_rect_w + edge_margin;
-        float hy1 = state->hive_rect_y + state->hive_rect_h + edge_margin;
-        if (x >= hx0 && x <= hx1 && y >= hy0 && y <= hy1) {
-            return false;
-        }
-    }
-    for (size_t i = 0; i < existing_count; ++i) {
-        const FlowerPatch *patch = &state->patches[i];
-        float dx = patch->x - x;
-        float dy = patch->y - y;
-        float dist_sq = dx * dx + dy * dy;
-        float min_sep = patch->radius + radius + state->default_radius * 3.0f;
-        if (dist_sq < (min_sep * min_sep)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static void generate_flower_patches(SimState *state, uint64_t *rng_state) {
-    if (!state) {
-        return;
-    }
-    uint64_t scratch_rng = rng_state ? *rng_state : state->rng_state;
-    const size_t min_patches = 3;
-    const size_t max_patches = SIM_MAX_FLOWER_PATCHES;
-    size_t count = min_patches;
-    if (max_patches > min_patches) {
-        float roll = rand_uniform01(&scratch_rng);
-        size_t span = max_patches - min_patches + 1;
-        count = min_patches + (size_t)floorf(roll * (float)span);
-        if (count > max_patches) {
-            count = max_patches;
-        }
-        if (count < min_patches) {
-            count = min_patches;
-        }
-    }
-
-    state->patch_count = 0;
-    for (size_t i = 0; i < count; ++i) {
-        const float radius_min = 60.0f;
-        const float radius_max = 140.0f;
-        float radius = radius_min + (radius_max - radius_min) * rand_uniform01(&scratch_rng);
-
-        float px = state->world_w * 0.5f;
-        float py = state->world_h * 0.5f;
-        bool placed = false;
-        for (int attempt = 0; attempt < 64; ++attempt) {
-            float rx = rand_uniform01(&scratch_rng) * state->world_w;
-            float ry = rand_uniform01(&scratch_rng) * state->world_h;
-            if (patch_location_valid(state, rx, ry, radius, state->patch_count)) {
-                px = rx;
-                py = ry;
-                placed = true;
-                break;
-            }
-        }
-        if (!placed) {
-            float angle = TWO_PI * rand_uniform01(&scratch_rng);
-            float dist = fminf(state->world_w, state->world_h) * (0.35f + 0.15f * rand_uniform01(&scratch_rng));
-            px = state->world_w * 0.5f + cosf(angle) * dist;
-            py = state->world_h * 0.5f + sinf(angle) * dist;
-            px = clampf(px, radius, state->world_w - radius);
-            py = clampf(py, radius, state->world_h - radius);
-        }
-
-        float quality = 0.55f + 0.45f * rand_uniform01(&scratch_rng);
-        float capacity = radius * quality * 12.0f;
-        float initial = capacity * (0.65f + 0.25f * rand_uniform01(&scratch_rng));
-        float replenish = quality * 6.0f;
-
-        FlowerPatch patch = {
-            .x = px,
-            .y = py,
-            .radius = radius,
-            .quality = quality,
-            .stock = initial,
-            .capacity = capacity,
-            .replenish_rate = replenish,
-            .initial_stock = initial,
-        };
-        state->patches[state->patch_count++] = patch;
-    }
-
-    if (rng_state) {
-        *rng_state = scratch_rng;
-    } else {
-        state->rng_state = scratch_rng;
-    }
-}
-
-static void compute_hive_points(const SimState *state,
-                                float *entrance_x,
-                                float *entrance_y,
-                                float *unload_x,
-                                float *unload_y) {
-    if (!state) {
-        if (entrance_x) *entrance_x = 0.0f;
-        if (entrance_y) *entrance_y = 0.0f;
-        if (unload_x) *unload_x = 0.0f;
-        if (unload_y) *unload_y = 0.0f;
-        return;
-    }
-    const float hx = state->hive_rect_x;
-    const float hy = state->hive_rect_y;
-    const float hw = state->hive_rect_w;
-    const float hh = state->hive_rect_h;
-    const float t = clampf(state->hive_entrance_t, 0.0f, 1.0f);
-    float ex = hx + hw * 0.5f;
-    float ey = hy + hh * 0.5f;
-    switch (state->hive_entrance_side) {
-        case 0:  // top
-            ex = hx + hw * t;
-            ey = hy;
-            break;
-        case 1:  // bottom
-            ex = hx + hw * t;
-            ey = hy + hh;
-            break;
-        case 2:  // left
-            ex = hx;
-            ey = hy + hh * t;
-            break;
-        case 3:  // right
-            ex = hx + hw;
-            ey = hy + hh * t;
-            break;
-        default:
-            break;
-    }
-    if (entrance_x) *entrance_x = ex;
-    if (entrance_y) *entrance_y = ey;
-
-    float unload_px = hx + hw * 0.5f;
-    float unload_py = hy + hh * 0.6f;
-    if (unload_x) *unload_x = unload_px;
-    if (unload_y) *unload_y = unload_py;
-}
-
-static FlowerPatch *sim_get_patch(SimState *state, int32_t patch_id) {
-    if (!state || patch_id < 0) {
-        return NULL;
-    }
-    if ((size_t)patch_id >= state->patch_count) {
-        return NULL;
-    }
-    return &state->patches[patch_id];
-}
-
-static const FlowerPatch *sim_get_patch_const(const SimState *state, int32_t patch_id) {
-    if (!state || patch_id < 0) {
-        return NULL;
-    }
-    if ((size_t)patch_id >= state->patch_count) {
-        return NULL;
-    }
-    return &state->patches[patch_id];
-}
-
-static void replenish_patches(SimState *state, float dt_sec) {
-    if (!state || dt_sec <= 0.0f) {
-        return;
-    }
-    for (size_t i = 0; i < state->patch_count; ++i) {
-        FlowerPatch *patch = &state->patches[i];
-        patch->stock += patch->replenish_rate * dt_sec;
-        if (patch->stock > patch->capacity) {
-            patch->stock = patch->capacity;
-        }
-    }
-}
-
-static void sample_patch_point(const FlowerPatch *patch, uint64_t *rng, float *out_x, float *out_y) {
-    if (!patch) {
-        if (out_x) *out_x = 0.0f;
-        if (out_y) *out_y = 0.0f;
-        return;
-    }
-    float radius = patch->radius;
-    float angle = rand_uniform01(rng) * TWO_PI;
-    float r = radius * sqrtf(rand_uniform01(rng));
-    if (out_x) *out_x = patch->x + cosf(angle) * r;
-    if (out_y) *out_y = patch->y + sinf(angle) * r;
-}
-
-static int32_t choose_flower_patch(const SimState *state,
-                                   float from_x,
-                                   float from_y,
-                                   uint64_t *rng) {
-    if (!state || state->patch_count == 0) {
-        return -1;
-    }
-    int32_t best_index = -1;
-    float best_score = -FLT_MAX;
-    for (size_t i = 0; i < state->patch_count; ++i) {
-        const FlowerPatch *patch = &state->patches[i];
-        if (patch->stock <= 0.5f) {
-            continue;
-        }
-        float dx = patch->x - from_x;
-        float dy = patch->y - from_y;
-        float distance = sqrtf(dx * dx + dy * dy) + 1.0f;
-        float stock_factor = patch->stock / fmaxf(1.0f, patch->capacity);
-        float quality = patch->quality;
-        float score = (stock_factor * quality) / distance;
-        if (rng) {
-            float jitter = 1.0f + 0.1f * (rand_uniform01(rng) - 0.5f);
-            score *= jitter;
-        }
-        if (score > best_score) {
-            best_score = score;
-            best_index = (int32_t)i;
-        }
-    }
-    if (best_index < 0 && state->patch_count > 0) {
-        best_index = (int32_t)(rand_uniform01(rng) * (float)state->patch_count);
-        if ((size_t)best_index >= state->patch_count) {
-            best_index = (int32_t)(state->patch_count - 1);
-        }
-    }
-    return best_index;
-}
 static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
     if (!state) {
         return;
@@ -773,7 +183,7 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
     float entrance_y = state->world_h * 0.5f;
     float unload_x = entrance_x;
     float unload_y = entrance_y;
-    compute_hive_points(state, &entrance_x, &entrance_y, &unload_x, &unload_y);
+    hive_compute_points(state, &entrance_x, &entrance_y, &unload_x, &unload_y);
 
     const float bee_radius = state->default_radius;
     const float spacing = clamp_positive(bee_radius * 3.0f, bee_radius * 1.5f);
@@ -795,7 +205,7 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
 
     uint64_t rng = state->rng_state;
 
-    generate_flower_patches(state, &rng);
+    plants_generate(state, &rng);
 
     for (size_t i = 0; i < state->count; ++i) {
         size_t col = i % cols;
@@ -985,7 +395,7 @@ void sim_tick(SimState *state, float dt_sec) {
         return;
     }
 
-    replenish_patches(state, dt_sec);
+    plants_replenish(state, dt_sec);
 
     uint64_t rng = state->rng_state;
     const float world_w = state->world_w;
@@ -1000,7 +410,7 @@ void sim_tick(SimState *state, float dt_sec) {
     float entrance_y = world_h * 0.5f;
     float unload_x = entrance_x;
     float unload_y = entrance_y;
-    compute_hive_points(state, &entrance_x, &entrance_y, &unload_x, &unload_y);
+    hive_compute_points(state, &entrance_x, &entrance_y, &unload_x, &unload_y);
 
     double speed_sum = 0.0;
     float speed_min_tick = FLT_MAX;
@@ -1035,7 +445,7 @@ void sim_tick(SimState *state, float dt_sec) {
         }
         float harvest_rate = state->harvest_rate_uLps[i] > 0.0f ? state->harvest_rate_uLps[i] : state->bee_harvest_rate_uLps;
 
-        const FlowerPatch *target_patch = sim_get_patch_const(state, target_id);
+        const FlowerPatch *target_patch = plants_get_patch_const(state, target_id);
         bool inside_hive_now = state->hive_enabled &&
                                x >= state->hive_rect_x &&
                                x <= state->hive_rect_x + state->hive_rect_w &&
@@ -1092,13 +502,13 @@ void sim_tick(SimState *state, float dt_sec) {
         bool mode_changed = (mode != prev_mode);
 
         if (mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) {
-            if (target_id < 0 || !sim_get_patch_const(state, target_id)) {
-                target_id = choose_flower_patch(state, x, y, &rng);
+            if (target_id < 0 || !plants_get_patch_const(state, target_id)) {
+                target_id = plants_choose_patch(state, x, y, &rng);
                 mode_changed = true;
             }
         }
 
-        target_patch = sim_get_patch_const(state, target_id);
+        target_patch = plants_get_patch_const(state, target_id);
         if ((mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) && !target_patch) {
             intent = BEE_INTENT_REST;
             mode = BEE_MODE_IDLE;
@@ -1109,7 +519,7 @@ void sim_tick(SimState *state, float dt_sec) {
             if (mode_changed || target_id != state->target_id[i]) {
                 float sample_x = target_patch->x;
                 float sample_y = target_patch->y;
-                sample_patch_point(target_patch, &rng, &sample_x, &sample_y);
+                plants_sample_point(target_patch, &rng, &sample_x, &sample_y);
                 target_x = sample_x;
                 target_y = sample_y;
             }
@@ -1245,7 +655,7 @@ void sim_tick(SimState *state, float dt_sec) {
         }
 
         if (mode == BEE_MODE_FORAGING) {
-            FlowerPatch *patch_mut = sim_get_patch(state, target_id);
+            FlowerPatch *patch_mut = plants_get_patch(state, target_id);
             if (patch_mut && patch_mut->stock > 0.0f) {
                 float patch_factor = 0.6f + 0.4f * patch_mut->quality;
                 float harvest = harvest_rate * patch_factor * dt_sec;
@@ -1442,7 +852,7 @@ void sim_apply_runtime_params(SimState *state, const Params *params) {
     state->bee_speed_mps = params->bee.speed_mps;
     state->bee_seek_accel = params->bee.seek_accel;
     state->bee_arrive_tol_world = params->bee.arrive_tol_world;
-    sim_build_hive_segments(state);
+    hive_build_segments(state);
 
     for (size_t i = 0; i < state->count; ++i) {
         state->capacity_uL[i] = state->bee_capacity_uL;
