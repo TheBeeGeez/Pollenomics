@@ -71,6 +71,10 @@ typedef struct SimState {
     float *capacity_uL;
     float *harvest_rate_uLps;
     uint8_t *inside_hive_flag;
+    float *path_waypoint_x;
+    float *path_waypoint_y;
+    uint8_t *path_has_waypoint;
+    uint8_t *path_valid;
     uint64_t rng_state;
     double log_accum_sec;
     uint64_t log_bounce_count;

@@ -27,6 +27,9 @@ typedef struct RenderView {
     const float *patch_ring_radii_px;
     const uint32_t *patch_ring_rgba;
     size_t patch_count;
+    const float *debug_lines_xy;         // Sequence of (start,end) points, 4 floats per line.
+    const uint32_t *debug_line_rgba;     // One color per line (0xRRGGBBAA).
+    size_t debug_line_count;
 } RenderView;
 
 bool render_init(Render *out, const Params *params);

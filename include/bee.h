@@ -56,6 +56,12 @@ typedef struct BeeDebugInfo {
     uint8_t mode;
     uint8_t intent;
     bool inside_hive;
+    float path_waypoint_x;
+    float path_waypoint_y;
+    float path_final_x;
+    float path_final_y;
+    uint8_t path_has_waypoint;
+    uint8_t path_valid;
 } BeeDebugInfo;
 
 typedef struct BeeDecisionContext {

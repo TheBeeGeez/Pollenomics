@@ -12,6 +12,7 @@
 #include "util/log.h"
 
 #include "sim_internal.h"
+#include "bee_path.h"
 #include "hive.h"
 #include "plants.h"
 
@@ -288,6 +289,18 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
         if (i == 0 && state->hive_enabled) {
             state->inside_hive_flag[i] = 1u;
         }
+        if (state->path_valid) {
+            state->path_valid[i] = 0u;
+        }
+        if (state->path_has_waypoint) {
+            state->path_has_waypoint[i] = 0u;
+        }
+        if (state->path_waypoint_x) {
+            state->path_waypoint_x[i] = unload_x;
+        }
+        if (state->path_waypoint_y) {
+            state->path_waypoint_y[i] = unload_y;
+        }
     }
 
     state->rng_state = rng;
@@ -322,6 +335,10 @@ static void sim_release(SimState *state) {
     free_aligned(state->capacity_uL);
     free_aligned(state->harvest_rate_uLps);
     free_aligned(state->inside_hive_flag);
+    free_aligned(state->path_waypoint_x);
+    free_aligned(state->path_waypoint_y);
+    free_aligned(state->path_has_waypoint);
+    free_aligned(state->path_valid);
     free(state);
 }
 
@@ -375,6 +392,10 @@ bool sim_init(SimState **out_state, const Params *params) {
     state->capacity_uL = (float *)alloc_aligned(sizeof(float) * count);
     state->harvest_rate_uLps = (float *)alloc_aligned(sizeof(float) * count);
     state->inside_hive_flag = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
+    state->path_waypoint_x = (float *)alloc_aligned(sizeof(float) * count);
+    state->path_waypoint_y = (float *)alloc_aligned(sizeof(float) * count);
+    state->path_has_waypoint = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
+    state->path_valid = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
 
     if (!state->x || !state->y || !state->vx || !state->vy || !state->heading ||
         !state->radius || !state->color_rgba || !state->scratch_xy ||
@@ -382,7 +403,8 @@ bool sim_init(SimState **out_state, const Params *params) {
         !state->target_pos_x || !state->target_pos_y || !state->target_id ||
         !state->topic_id || !state->topic_confidence || !state->role ||
         !state->mode || !state->intent || !state->capacity_uL || !state->harvest_rate_uLps ||
-        !state->inside_hive_flag) {
+        !state->inside_hive_flag || !state->path_waypoint_x || !state->path_waypoint_y ||
+        !state->path_has_waypoint || !state->path_valid) {
         LOG_ERROR("sim_init: allocation failure for bee buffers");
         sim_release(state);
         return false;
@@ -563,14 +585,41 @@ void sim_tick(SimState *state, float dt_sec) {
         float distance = sqrtf(dist_sq);
         bool flight_mode = (mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING);
 
+        uint8_t path_valid = 0u;
+        uint8_t path_has_waypoint = 0u;
+        float path_waypoint_x = target_x;
+        float path_waypoint_y = target_y;
+
         float desired_vx = 0.0f;
         float desired_vy = 0.0f;
         if (flight_mode) {
             if (distance > 1e-5f) {
-                float inv_dist = 1.0f / distance;
-                float dir_x = dx * inv_dist;
-                float dir_y = dy * inv_dist;
-                float jitter = 0.15f * rand_symmetric(&rng);
+                float dir_x = 0.0f;
+                float dir_y = 0.0f;
+                BeePathPlan path_plan = {0};
+                bool have_plan = bee_path_plan(state, i, target_x, target_y, current_arrive_tol, &path_plan);
+                if (have_plan && path_plan.valid) {
+                    dir_x = path_plan.dir_x;
+                    dir_y = path_plan.dir_y;
+                    path_valid = 1u;
+                    path_has_waypoint = path_plan.has_waypoint ? 1u : 0u;
+                    if (path_plan.has_waypoint) {
+                        path_waypoint_x = path_plan.waypoint_x;
+                        path_waypoint_y = path_plan.waypoint_y;
+                    } else {
+                        path_waypoint_x = path_plan.final_x;
+                        path_waypoint_y = path_plan.final_y;
+                    }
+                } else {
+                    float inv_dist = 1.0f / distance;
+                    dir_x = dx * inv_dist;
+                    dir_y = dy * inv_dist;
+                    path_valid = 1u;
+                    path_has_waypoint = 0u;
+                    path_waypoint_x = target_x;
+                    path_waypoint_y = target_y;
+                }
+                float jitter = 0.08f * rand_symmetric(&rng);
                 float cos_j = cosf(jitter);
                 float sin_j = sinf(jitter);
                 float rot_x = dir_x * cos_j - dir_y * sin_j;
@@ -719,6 +768,18 @@ void sim_tick(SimState *state, float dt_sec) {
         state->intent[i] = intent;
         state->mode[i] = mode;
         state->color_rgba[i] = bee_color_for(state->role[i], mode);
+        if (state->path_valid) {
+            state->path_valid[i] = path_valid;
+        }
+        if (state->path_has_waypoint) {
+            state->path_has_waypoint[i] = (path_valid ? path_has_waypoint : 0u);
+        }
+        if (state->path_waypoint_x) {
+            state->path_waypoint_x[i] = path_valid ? path_waypoint_x : target_x;
+        }
+        if (state->path_waypoint_y) {
+            state->path_waypoint_y[i] = path_valid ? path_waypoint_y : target_y;
+        }
         state->target_pos_x[i] = target_x;
         state->target_pos_y[i] = target_y;
         state->target_id[i] = target_id;
@@ -1003,9 +1064,22 @@ bool sim_get_bee_info(const SimState *state, size_t index, BeeDebugInfo *out_inf
     info.target_id = state->target_id[index];
     info.topic_id = state->topic_id[index];
     info.topic_confidence = state->topic_confidence[index];
-    info.role = state->role[index];
-    info.mode = state->mode[index];
-    info.intent = state->intent[index];
+   info.role = state->role[index];
+   info.mode = state->mode[index];
+   info.intent = state->intent[index];
+    info.path_final_x = state->target_pos_x[index];
+    info.path_final_y = state->target_pos_y[index];
+    uint8_t path_valid = (state->path_valid) ? state->path_valid[index] : 0u;
+    info.path_valid = path_valid;
+    uint8_t has_waypoint = (path_valid && state->path_has_waypoint) ? state->path_has_waypoint[index] : 0u;
+    info.path_has_waypoint = has_waypoint;
+    if (path_valid && state->path_waypoint_x && state->path_waypoint_y) {
+        info.path_waypoint_x = state->path_waypoint_x[index];
+        info.path_waypoint_y = state->path_waypoint_y[index];
+    } else {
+        info.path_waypoint_x = info.path_final_x;
+        info.path_waypoint_y = info.path_final_y;
+    }
 
     bool inside_hive = false;
     if (state->hive_enabled && state->hive_rect_w > 0.0f && state->hive_rect_h > 0.0f) {

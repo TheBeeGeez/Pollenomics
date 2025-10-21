@@ -11,6 +11,7 @@ add_executable(bee_sim
   src/app/app.c
   src/config/params.c
   src/sim/bee.c
+  src/sim/bee_path.c
   src/sim/hive.c
   src/sim/plants.c
   src/sim/sim.c
