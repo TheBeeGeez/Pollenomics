@@ -211,6 +211,7 @@ bool app_init(const Params *params) {
         plat_shutdown(&g_platform);
         return false;
     }
+    LOG_INFO("app_init: sim ready");
 
     int init_fb_w = g_params.window_width_px;
     int init_fb_h = g_params.window_height_px;

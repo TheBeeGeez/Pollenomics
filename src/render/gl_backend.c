@@ -207,15 +207,17 @@ static bool ensure_instance_capacity(RenderState *state, size_t desired_count) {
     return true;
 }
 
-static void pack_instance_data(RenderState *state, const RenderView *view, size_t count) {
-    if (!state->instance_cpu_buffer || !view) {
+static void pack_instance_batch(RenderState *state,
+                                size_t offset,
+                                const float *positions_xy,
+                                const float *radii_px,
+                                const uint32_t *color_rgba,
+                                size_t count) {
+    if (!state->instance_cpu_buffer || count == 0) {
         return;
     }
 
-    InstanceAttrib *attribs = (InstanceAttrib *)state->instance_cpu_buffer;
-    const float *positions = view->positions_xy;
-    const float *radii = view->radii_px;
-    const uint32_t *colors = view->color_rgba;
+    InstanceAttrib *attribs = (InstanceAttrib *)state->instance_cpu_buffer + offset;
     const float default_cx = state->fb_width * 0.5f;
     const float default_cy = state->fb_height * 0.5f;
     const float default_radius = state->default_radius_px > 0.0f ? state->default_radius_px : 1.0f;
@@ -225,19 +227,22 @@ static void pack_instance_data(RenderState *state, const RenderView *view, size_
     const unsigned char def_a = state->default_color_rgba[3];
 
     for (size_t i = 0; i < count; ++i) {
-        float cx = positions ? positions[i * 2 + 0] : default_cx;
-        float cy = positions ? positions[i * 2 + 1] : default_cy;
-        float radius = radii ? radii[i] : default_radius;
-        if (radius <= 0.0f) {
+        float cx = positions_xy ? positions_xy[i * 2 + 0] : default_cx;
+        float cy = positions_xy ? positions_xy[i * 2 + 1] : default_cy;
+        float radius = radii_px ? radii_px[i] : default_radius;
+        if (!radii_px && radius <= 0.0f) {
             radius = default_radius;
+        }
+        if (radius < 0.0f) {
+            radius = 0.0f;
         }
 
         unsigned char r = def_r;
         unsigned char g = def_g;
         unsigned char b = def_b;
         unsigned char a = def_a;
-        if (colors) {
-            uint32_t packed = colors[i];
+        if (color_rgba) {
+            uint32_t packed = color_rgba[i];
             r = (unsigned char)((packed >> 24) & 0xFF);
             g = (unsigned char)((packed >> 16) & 0xFF);
             b = (unsigned char)((packed >> 8) & 0xFF);
@@ -425,16 +430,40 @@ void render_frame(Render *render, const RenderView *view) {
                  state->clear_color[3]);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    size_t instance_count = view ? view->count : 0;
-    if (!state->program || instance_count == 0) {
+    size_t bee_count = view ? view->count : 0;
+    size_t patch_count = view ? view->patch_count : 0;
+    const bool patch_data_valid = view && view->patch_positions_xy && view->patch_radii_px && view->patch_fill_rgba && view->patch_ring_radii_px && view->patch_ring_rgba;
+    if (!patch_data_valid) {
+        patch_count = 0;
+    }
+    size_t total_instances = bee_count + (patch_count * 2);
+    if (!state->program || total_instances == 0) {
         return;
     }
 
-    if (!ensure_instance_capacity(state, instance_count)) {
+    if (!ensure_instance_capacity(state, total_instances)) {
         return;
     }
 
-    pack_instance_data(state, view, instance_count);
+    size_t offset = 0;
+    if (patch_count > 0) {
+        pack_instance_batch(state,
+                            offset,
+                            view->patch_positions_xy,
+                            view->patch_radii_px,
+                            view->patch_fill_rgba,
+                            patch_count);
+        offset += patch_count;
+        pack_instance_batch(state,
+                            offset,
+                            view->patch_positions_xy,
+                            view->patch_ring_radii_px,
+                            view->patch_ring_rgba,
+                            patch_count);
+        offset += patch_count;
+    }
+    pack_instance_batch(state, offset, view ? view->positions_xy : NULL, view ? view->radii_px : NULL,
+                        view ? view->color_rgba : NULL, bee_count);
 
     float cam_zoom = state->cam_zoom;
     if (cam_zoom <= 0.0f) {
@@ -443,7 +472,7 @@ void render_frame(Render *render, const RenderView *view) {
     float cam_center_x = state->cam_center[0];
     float cam_center_y = state->cam_center[1];
 
-    size_t byte_count = instance_count * (size_t)INSTANCE_STRIDE;
+    size_t byte_count = total_instances * (size_t)INSTANCE_STRIDE;
     glBindBuffer(GL_ARRAY_BUFFER, state->instance_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)state->instance_buffer_size, NULL, GL_STREAM_DRAW);
     glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)byte_count, state->instance_cpu_buffer);
@@ -454,7 +483,7 @@ void render_frame(Render *render, const RenderView *view) {
     glUniform2f(state->u_cam_center, cam_center_x, cam_center_y);
     glUniform1f(state->u_cam_zoom, cam_zoom);
     glBindVertexArray(state->vao);
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)instance_count);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)total_instances);
     glBindVertexArray(0);
     glUseProgram(0);
 }

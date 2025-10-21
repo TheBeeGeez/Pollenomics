@@ -23,6 +23,24 @@ typedef struct {
     float x, y, w, h;
 } UiRect;
 
+typedef struct {
+    float r, g, b, a;
+} UiColor;
+
+typedef struct {
+    const char *label;
+    float min_value;
+    float max_value;
+    float step;
+    float *value;
+    int id;
+} SliderSpec;
+
+static bool ui_rect_contains(const UiRect *rect, float px, float py);
+static size_t ui_add_rect(float x, float y, float w, float h, UiColor color);
+static float ui_measure_text(const char *text);
+static void ui_draw_text(float x, float y, const char *text, UiColor color);
+
 static float ui_clampf(float v, float lo, float hi) {
     if (v < lo) {
         return lo;
@@ -32,10 +50,6 @@ static float ui_clampf(float v, float lo, float hi) {
     }
     return v;
 }
-
-typedef struct {
-    float r, g, b, a;
-} UiColor;
 
 typedef struct {
     float x, y;
@@ -117,6 +131,100 @@ static const char *const UI_FRAGMENT_SHADER =
 static UiColor ui_color_rgba(float r, float g, float b, float a) {
     UiColor c = {r, g, b, a};
     return c;
+}
+
+static float ui_draw_slider_group(const SliderSpec *sliders,
+                                  size_t slider_count,
+                                  float text_x,
+                                  float slider_width,
+                                  float cursor_y,
+                                  UiColor text_color,
+                                  float *panel_max_x,
+                                  bool mouse_pressed,
+                                  bool mouse_down) {
+    for (size_t i = 0; i < slider_count; ++i) {
+        const SliderSpec *spec = &sliders[i];
+        ui_draw_text(text_x, cursor_y, spec->label, text_color);
+        if (panel_max_x) {
+            float text_width = ui_measure_text(spec->label);
+            if (text_x + text_width > *panel_max_x) {
+                *panel_max_x = text_x + text_width;
+            }
+        }
+        UiRect slider_rect = {text_x, cursor_y + 18.0f, slider_width, UI_SLIDER_HEIGHT};
+        bool hovered = ui_rect_contains(&slider_rect, g_ui.mouse_x, g_ui.mouse_y);
+        ui_add_rect(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h,
+                    ui_color_rgba(0.15f, 0.15f, 0.18f, 0.95f));
+        if (panel_max_x) {
+            float edge = slider_rect.x + slider_rect.w;
+            if (edge > *panel_max_x) {
+                *panel_max_x = edge;
+            }
+        }
+
+        float range = spec->max_value - spec->min_value;
+        float ratio = (range > 0.0f) ? ((*spec->value - spec->min_value) / range) : 0.0f;
+        ratio = ui_clampf(ratio, 0.0f, 1.0f);
+        float fill_w = slider_rect.w * ratio;
+        UiColor track = hovered ? ui_color_rgba(0.2f, 0.4f, 0.7f, 1.0f)
+                                : ui_color_rgba(0.25f, 0.25f, 0.3f, 1.0f);
+        ui_add_rect(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, track);
+        float knob_x = slider_rect.x + fill_w - 6.0f;
+        ui_add_rect(knob_x, slider_rect.y - 2.0f, 12.0f, slider_rect.h + 4.0f,
+                    ui_color_rgba(0.9f, 0.9f, 0.9f, 1.0f));
+
+        bool active = g_ui.active_slider == spec->id;
+        if (hovered && mouse_pressed) {
+            g_ui.active_slider = spec->id;
+            g_ui.capturing_mouse = true;
+            active = true;
+        }
+        if (active) {
+            if (mouse_down) {
+                float t = (g_ui.mouse_x - slider_rect.x) / slider_rect.w;
+                t = ui_clampf(t, 0.0f, 1.0f);
+                float new_value = spec->min_value + t * range;
+                if (spec->step > 0.0f && range > 0.0f) {
+                    float steps = roundf((new_value - spec->min_value) / spec->step);
+                    new_value = spec->min_value + steps * spec->step;
+                }
+                new_value = ui_clampf(new_value, spec->min_value, spec->max_value);
+                if (fabsf(new_value - *spec->value) > 0.0001f) {
+                    *spec->value = new_value;
+                }
+            } else {
+                g_ui.active_slider = -1;
+                g_ui.capturing_mouse = false;
+            }
+        }
+
+        if (spec->value == &g_ui.runtime->motion_spawn_speed_mean) {
+            float min_allowed = g_ui.runtime->motion_min_speed;
+            float max_allowed = g_ui.runtime->motion_max_speed;
+            if (max_allowed < min_allowed) {
+                max_allowed = min_allowed;
+            }
+            *spec->value = ui_clampf(*spec->value, min_allowed, max_allowed);
+        } else if (spec->value == &g_ui.runtime->motion_spawn_speed_std) {
+            if (*spec->value < 0.0f) {
+                *spec->value = 0.0f;
+            }
+        }
+
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%.1f", *spec->value);
+        float value_x = slider_rect.x + slider_rect.w + 10.0f;
+        ui_draw_text(value_x, slider_rect.y - 2.0f, buffer, text_color);
+        if (panel_max_x) {
+            float val_width = ui_measure_text(buffer);
+            float edge = value_x + val_width;
+            if (edge > *panel_max_x) {
+                *panel_max_x = edge;
+            }
+        }
+        cursor_y += UI_SLIDER_SPACING;
+    }
+    return cursor_y;
 }
 
 static bool ui_rect_contains(const UiRect *rect, float px, float py) {
@@ -228,11 +336,11 @@ static const char *ui_role_name(uint8_t role) {
 static const char *ui_mode_name(uint8_t mode) {
     switch (mode) {
         case BEE_MODE_IDLE: return "IDLE";
+        case BEE_MODE_OUTBOUND: return "OUTBOUND";
         case BEE_MODE_FORAGING: return "FORAGING";
         case BEE_MODE_RETURNING: return "RETURNING";
-        case BEE_MODE_APPROACH_ENTRANCE: return "APPROACH ENTRANCE";
-        case BEE_MODE_INSIDE_MOVE: return "INSIDE MOVE";
-        case BEE_MODE_UNLOAD_WAIT: return "UNLOAD WAIT";
+        case BEE_MODE_ENTERING: return "ENTERING";
+        case BEE_MODE_UNLOADING: return "UNLOADING";
         default: return "UNKNOWN";
     }
 }
@@ -592,8 +700,13 @@ static void ui_draw_selected_bee_panel(void) {
     ADD_LINE(line, text_color, 18.0f);
 
     int energy_pct = (int)(info->energy * 100.0f + 0.5f);
-    int load_pct = (int)(info->load_nectar * 100.0f + 0.5f);
-    snprintf(line, sizeof(line), "ENERGY %d%%  |  NECTAR %d%%", energy_pct, load_pct);
+    float load_pct_f = (info->capacity_uL > 0.0f) ? (info->load_nectar / info->capacity_uL) * 100.0f : 0.0f;
+    if (load_pct_f < 0.0f) load_pct_f = 0.0f;
+    if (load_pct_f > 100.0f) load_pct_f = 100.0f;
+    snprintf(line, sizeof(line), "ENERGY %d%%  |  NECTAR %.1f uL (%.0f%%)", energy_pct, info->load_nectar, load_pct_f);
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "CAPACITY %.1f uL  |  HARVEST %.1f uL/s", info->capacity_uL, info->harvest_rate_uLps);
     ADD_LINE(line, text_color, 18.0f);
 
     snprintf(line, sizeof(line), "SPEED %.1f PX/S  |  AGE %.1f DAYS", info->speed, info->age_days);
@@ -794,16 +907,7 @@ static void ui_begin_frame(const Input *input) {
     panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("SIM CONTROLS"));
     cursor_y += 24.0f;
 
-    typedef struct {
-        const char *label;
-        float min_value;
-        float max_value;
-        float step;
-        float *value;
-        int id;
-    } SliderSpec;
-
-    SliderSpec sliders[] = {
+    SliderSpec motion_sliders[] = {
         {"MIN SPEED", 0.0f, 200.0f, 1.0f, &g_ui.runtime->motion_min_speed, 0},
         {"MAX SPEED", 0.0f, 200.0f, 1.0f, &g_ui.runtime->motion_max_speed, 1},
         {"HEADING JITTER", 0.0f, 180.0f, 1.0f, &g_ui.runtime->motion_jitter_deg_per_sec, 2},
@@ -812,78 +916,58 @@ static void ui_begin_frame(const Input *input) {
         {"SPAWN SPEED STD", 0.0f, 120.0f, 1.0f, &g_ui.runtime->motion_spawn_speed_std, 5},
     };
 
-    sliders[4].min_value = g_ui.runtime->motion_min_speed;
-    sliders[4].max_value = g_ui.runtime->motion_max_speed;
-    if (sliders[4].max_value < sliders[4].min_value) {
-        sliders[4].max_value = sliders[4].min_value;
+    motion_sliders[4].min_value = g_ui.runtime->motion_min_speed;
+    motion_sliders[4].max_value = g_ui.runtime->motion_max_speed;
+    if (motion_sliders[4].max_value < motion_sliders[4].min_value) {
+        motion_sliders[4].max_value = motion_sliders[4].min_value;
     }
 
     float slider_x = text_x;
     float slider_width = content_width;
 
-    for (size_t i = 0; i < sizeof(sliders)/sizeof(sliders[0]); ++i) {
-        SliderSpec *spec = &sliders[i];
-        ui_draw_text(slider_x, cursor_y, spec->label, text);
-        panel_max_x = fmaxf(panel_max_x, slider_x + ui_measure_text(spec->label));
-        UiRect slider_rect = {slider_x, cursor_y + 18.0f, slider_width, UI_SLIDER_HEIGHT};
-        bool hovered = ui_rect_contains(&slider_rect, g_ui.mouse_x, g_ui.mouse_y);
+    cursor_y = ui_draw_slider_group(motion_sliders,
+                                    sizeof(motion_sliders) / sizeof(motion_sliders[0]),
+                                    slider_x,
+                                    slider_width,
+                                    cursor_y,
+                                    text,
+                                    &panel_max_x,
+                                    mouse_pressed,
+                                    mouse_down);
 
-        ui_add_rect(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, ui_color_rgba(0.15f, 0.15f, 0.18f, 0.95f));
-        panel_max_x = fmaxf(panel_max_x, slider_rect.x + slider_rect.w);
+    ui_draw_text(text_x, cursor_y, "FORAGING", text);
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("FORAGING"));
+    cursor_y += 24.0f;
 
-        float range = spec->max_value - spec->min_value;
-        float ratio = (range > 0.0f) ? ((*spec->value - spec->min_value) / range) : 0.0f;
-        ratio = ui_clampf(ratio, 0.0f, 1.0f);
-        float fill_w = slider_rect.w * ratio;
-        UiColor track = hovered ? ui_color_rgba(0.2f, 0.4f, 0.7f, 1.0f) : ui_color_rgba(0.25f, 0.25f, 0.3f, 1.0f);
-        ui_add_rect(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, track);
+    SliderSpec forage_sliders[] = {
+        {"HARVEST RATE (uL/s)", 1.0f, 300.0f, 1.0f, &g_ui.runtime->bee.harvest_rate_uLps, 100},
+        {"CARRY CAPACITY (uL)", 10.0f, 120.0f, 1.0f, &g_ui.runtime->bee.capacity_uL, 101},
+        {"UNLOAD RATE (uL/s)", 10.0f, 400.0f, 5.0f, &g_ui.runtime->bee.unload_rate_uLps, 102},
+        {"REST RECOVERY (/s)", 0.05f, 1.5f, 0.01f, &g_ui.runtime->bee.rest_recovery_per_s, 103},
+        {"FLIGHT SPEED", 10.0f, 200.0f, 1.0f, &g_ui.runtime->bee.speed_mps, 104},
+        {"SEEK ACCEL", 10.0f, 600.0f, 5.0f, &g_ui.runtime->bee.seek_accel, 105},
+        {"ARRIVE TOL", 1.0f, 300.0f, 1.0f, &g_ui.runtime->bee.arrive_tol_world, 106},
+    };
 
-        float knob_x = slider_rect.x + fill_w - 6.0f;
-        ui_add_rect(knob_x, slider_rect.y - 2.0f, 12.0f, slider_rect.h + 4.0f, ui_color_rgba(0.9f, 0.9f, 0.9f, 1.0f));
+    float arrive_min = g_ui.runtime->bee_radius_px * 2.0f;
+    if (arrive_min > forage_sliders[6].min_value) {
+        forage_sliders[6].min_value = arrive_min;
+    }
+    if (forage_sliders[6].max_value < forage_sliders[6].min_value + 1.0f) {
+        forage_sliders[6].max_value = forage_sliders[6].min_value + 1.0f;
+    }
 
-        bool this_active = (g_ui.active_slider == spec->id);
-        if (mouse_pressed && hovered) {
-            g_ui.active_slider = spec->id;
-            g_ui.capturing_mouse = true;
-            this_active = true;
-        }
-        if (this_active) {
-            if (mouse_down) {
-                float t = (g_ui.mouse_x - slider_rect.x) / slider_rect.w;
-                t = ui_clampf(t, 0.0f, 1.0f);
-                float new_value = spec->min_value + t * range;
-                if (spec->step > 0.0f && range > 0.0f) {
-                    float steps = roundf((new_value - spec->min_value) / spec->step);
-                    new_value = spec->min_value + steps * spec->step;
-                }
-                new_value = ui_clampf(new_value, spec->min_value, spec->max_value);
-                if (fabsf(new_value - *spec->value) > 0.0001f) {
-                    *spec->value = new_value;
-                }
-            } else {
-                g_ui.active_slider = -1;
-                g_ui.capturing_mouse = false;
-            }
-        }
-
-        char buffer[32];
-        if (spec->value == &g_ui.runtime->motion_spawn_speed_mean) {
-            float min_allowed = g_ui.runtime->motion_min_speed;
-            float max_allowed = g_ui.runtime->motion_max_speed;
-            if (max_allowed < min_allowed) {
-                max_allowed = min_allowed;
-            }
-            *spec->value = ui_clampf(*spec->value, min_allowed, max_allowed);
-        } else if (spec->value == &g_ui.runtime->motion_spawn_speed_std) {
-            if (*spec->value < 0.0f) {
-                *spec->value = 0.0f;
-            }
-        }
-        snprintf(buffer, sizeof(buffer), "%.1f", *spec->value);
-        float value_x = slider_rect.x + slider_rect.w + 10.0f;
-        ui_draw_text(value_x, slider_rect.y - 2.0f, buffer, text);
-        panel_max_x = fmaxf(panel_max_x, value_x + ui_measure_text(buffer));
-        cursor_y += UI_SLIDER_SPACING;
+    cursor_y = ui_draw_slider_group(forage_sliders,
+                                    sizeof(forage_sliders) / sizeof(forage_sliders[0]),
+                                    slider_x,
+                                    slider_width,
+                                    cursor_y,
+                                    text,
+                                    &panel_max_x,
+                                    mouse_pressed,
+                                    mouse_down);
+    if (g_ui.runtime->bee.arrive_tol_world < forage_sliders[6].min_value) {
+        g_ui.runtime->bee.arrive_tol_world = forage_sliders[6].min_value;
     }
 
     if (g_ui.runtime->motion_min_speed > g_ui.runtime->motion_max_speed) {
@@ -1016,7 +1100,14 @@ static void ui_begin_frame(const Input *input) {
         runtime->motion_spawn_mode != baseline->motion_spawn_mode ||
         runtime->bee_count != baseline->bee_count ||
         fabsf(runtime->world_width_px - baseline->world_width_px) > 0.0001f ||
-        fabsf(runtime->world_height_px - baseline->world_height_px) > 0.0001f) {
+        fabsf(runtime->world_height_px - baseline->world_height_px) > 0.0001f ||
+        fabsf(runtime->bee.harvest_rate_uLps - baseline->bee.harvest_rate_uLps) > 0.0001f ||
+        fabsf(runtime->bee.capacity_uL - baseline->bee.capacity_uL) > 0.0001f ||
+        fabsf(runtime->bee.unload_rate_uLps - baseline->bee.unload_rate_uLps) > 0.0001f ||
+        fabsf(runtime->bee.rest_recovery_per_s - baseline->bee.rest_recovery_per_s) > 0.0001f ||
+        fabsf(runtime->bee.speed_mps - baseline->bee.speed_mps) > 0.0001f ||
+        fabsf(runtime->bee.seek_accel - baseline->bee.seek_accel) > 0.0001f ||
+        fabsf(runtime->bee.arrive_tol_world - baseline->bee.arrive_tol_world) > 0.0001f) {
         dirty_now = true;
     }
     g_ui.dirty = dirty_now;
