@@ -417,26 +417,6 @@ static void update_scratch(SimState *state) {
     }
 }
 
-static BeeRole sim_pick_role(float age_days, uint64_t *rng) {
-    if (age_days < 6.0f) {
-        return BEE_ROLE_NURSE;
-    }
-    if (age_days < 12.0f) {
-        return BEE_ROLE_HOUSEKEEPER;
-    }
-    if (age_days < 18.0f) {
-        return BEE_ROLE_STORAGE;
-    }
-    float roll = rand_uniform01(rng);
-    if (roll < 0.12f) {
-        return BEE_ROLE_SCOUT;
-    }
-    if (roll < 0.18f) {
-        return BEE_ROLE_GUARD;
-    }
-    return BEE_ROLE_FORAGER;
-}
-
 static void configure_from_params(SimState *state, const Params *params) {
     if (!state || !params) {
         return;
@@ -579,7 +559,7 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
         state->topic_id[i] = -1;
         state->topic_confidence[i] = 0;
 
-        BeeRole role = sim_pick_role(age_days, &rng);
+        BeeRole role = bee_pick_role(age_days, &rng);
         state->role[i] = (uint8_t)role;
 
         if (role == BEE_ROLE_FORAGER || role == BEE_ROLE_SCOUT) {
@@ -830,44 +810,32 @@ void sim_tick(SimState *state, float dt_sec) {
         energy = clampf(energy, 0.0f, 1.0f);
         load = clampf(load, 0.0f, 1.0f);
 
-        if (energy < 0.2f) {
-            intent = BEE_INTENT_REST;
-        } else if (load >= 0.8f) {
-            intent = BEE_INTENT_RETURN_HOME;
-        } else if (prev_intent == BEE_INTENT_REST && energy > 0.6f) {
-            intent = (state->role[i] == BEE_ROLE_FORAGER || state->role[i] == BEE_ROLE_SCOUT)
-                         ? BEE_INTENT_FIND_PATCH
-                         : BEE_INTENT_UNLOAD;
-        } else if (intent != BEE_INTENT_FIND_PATCH && intent != BEE_INTENT_EXPLORE &&
-                   intent != BEE_INTENT_HARVEST && !inside_hive) {
-            intent = BEE_INTENT_FIND_PATCH;
-        }
+        float hive_center_x = state->hive_rect_w > 0.0f ? state->hive_rect_x + state->hive_rect_w * 0.5f
+                                                        : world_w * 0.5f;
+        float hive_center_y = state->hive_rect_h > 0.0f ? state->hive_rect_y + state->hive_rect_h * 0.5f
+                                                        : world_h * 0.5f;
+        BeeDecisionContext bee_ctx = {
+            .inside_hive = inside_hive,
+            .energy = energy,
+            .load_nectar = load,
+            .role = state->role[i],
+            .previous_mode = prev_mode,
+            .previous_intent = prev_intent,
+            .hive_center_x = hive_center_x,
+            .hive_center_y = hive_center_y,
+            .world_width = world_w,
+            .world_height = world_h,
+            .forage_target_x = world_w * 0.75f,
+            .forage_target_y = world_h * 0.3f,
+        };
+        BeeDecisionOutput decision = {0};
+        bee_decide_next_action(&bee_ctx, &decision);
 
-        if (inside_hive && load <= 0.05f && (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_UNLOAD)) {
-            intent = (energy > 0.4f) ? BEE_INTENT_FIND_PATCH : BEE_INTENT_REST;
-        }
-
-        if (inside_hive) {
-            mode = (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_UNLOAD)
-                       ? BEE_MODE_UNLOAD_WAIT
-                       : BEE_MODE_INSIDE_MOVE;
-        } else if (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_REST) {
-            mode = BEE_MODE_RETURNING;
-        } else {
-            mode = BEE_MODE_FORAGING;
-        }
-
-        if (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_UNLOAD || intent == BEE_INTENT_REST) {
-            target_x = state->hive_rect_w > 0.0f ? state->hive_rect_x + state->hive_rect_w * 0.5f
-                                                 : state->world_w * 0.5f;
-            target_y = state->hive_rect_h > 0.0f ? state->hive_rect_y + state->hive_rect_h * 0.5f
-                                                 : state->world_h * 0.5f;
-            target_id = -1;
-        } else if (intent == BEE_INTENT_FIND_PATCH || intent == BEE_INTENT_HARVEST || intent == BEE_INTENT_EXPLORE) {
-            target_x = state->world_w * 0.75f;
-            target_y = state->world_h * 0.3f;
-            target_id = -1;
-        }
+        intent = decision.intent;
+        mode = decision.mode;
+        target_x = decision.target_x;
+        target_y = decision.target_y;
+        target_id = decision.target_id;
 
         if (speed_after > 1e-6f) {
             heading = wrap_angle(atan2f(vy, vx));
