@@ -17,6 +17,15 @@
 
 #define TWO_PI (2.0f * (float)M_PI)
 
+typedef struct HiveSegment {
+    float ax;
+    float ay;
+    float bx;
+    float by;
+    float nx;
+    float ny;
+} HiveSegment;
+
 typedef struct SimState {
     size_t count;
     size_t capacity;
@@ -40,6 +49,18 @@ typedef struct SimState {
     float *radius;
     uint32_t *color_rgba;
     float *scratch_xy;
+    float *age_days;
+    float *t_state;
+    float *energy;
+    float *load_nectar;
+    float *target_pos_x;
+    float *target_pos_y;
+    int32_t *target_id;
+    int16_t *topic_id;
+    uint8_t *topic_confidence;
+    uint8_t *role;
+    uint8_t *mode;
+    uint8_t *intent;
     uint64_t rng_state;
     double log_accum_sec;
     uint64_t log_bounce_count;
@@ -47,6 +68,22 @@ typedef struct SimState {
     double log_speed_sum;
     double log_speed_min;
     double log_speed_max;
+
+    // Hive collision data.
+    int hive_enabled;
+    float hive_rect_x;
+    float hive_rect_y;
+    float hive_rect_w;
+    float hive_rect_h;
+    int hive_entrance_side;
+    float hive_entrance_t;
+    float hive_entrance_width;
+    float hive_restitution;
+    float hive_tangent_damp;
+    int hive_max_iters;
+    float hive_safety_margin;
+    HiveSegment hive_segments[8];
+    size_t hive_segment_count;
 } SimState;
 
 static void *alloc_aligned(size_t bytes) {
@@ -147,6 +184,229 @@ static float wrap_angle(float angle) {
     return angle - (float)M_PI;
 }
 
+static void hive_clear_segments(SimState *state) {
+    if (!state) {
+        return;
+    }
+    state->hive_segment_count = 0;
+}
+
+static void hive_add_segment(SimState *state,
+                             float ax,
+                             float ay,
+                             float bx,
+                             float by,
+                             float nx,
+                             float ny) {
+    if (!state) {
+        return;
+    }
+    float dx = bx - ax;
+    float dy = by - ay;
+    float len_sq = dx * dx + dy * dy;
+    if (len_sq < 1e-6f) {
+        return;
+    }
+    if (state->hive_segment_count >= sizeof(state->hive_segments) / sizeof(state->hive_segments[0])) {
+        return;
+    }
+    float n_len = sqrtf(nx * nx + ny * ny);
+    if (n_len > 0.0f) {
+        nx /= n_len;
+        ny /= n_len;
+    } else {
+        nx = 0.0f;
+        ny = -1.0f;
+    }
+    HiveSegment *seg = &state->hive_segments[state->hive_segment_count++];
+    seg->ax = ax;
+    seg->ay = ay;
+    seg->bx = bx;
+    seg->by = by;
+    seg->nx = nx;
+    seg->ny = ny;
+}
+
+static void sim_build_hive_segments(SimState *state) {
+    hive_clear_segments(state);
+    if (!state) {
+        return;
+    }
+    if (state->hive_rect_w <= 0.0f || state->hive_rect_h <= 0.0f) {
+        state->hive_enabled = 0;
+        return;
+    }
+    state->hive_enabled = 1;
+
+    float x = state->hive_rect_x;
+    float y = state->hive_rect_y;
+    float w = state->hive_rect_w;
+    float h = state->hive_rect_h;
+    int side = state->hive_entrance_side;
+
+    float gap_half = state->hive_entrance_width * 0.5f;
+    float gap_min = 0.0f;
+    float gap_max = 0.0f;
+
+    if (side == 0 || side == 1) {
+        float side_len = w;
+        float gap_center = x + state->hive_entrance_t * side_len;
+        gap_min = fmaxf(x, gap_center - gap_half);
+        gap_max = fminf(x + w, gap_center + gap_half);
+    } else {
+        float side_len = h;
+        float gap_center = y + state->hive_entrance_t * side_len;
+        gap_min = fmaxf(y, gap_center - gap_half);
+        gap_max = fminf(y + h, gap_center + gap_half);
+    }
+
+    // Top side (0).
+    if (side == 0) {
+        if (gap_min > x) {
+            hive_add_segment(state, x, y, gap_min, y, 0.0f, -1.0f);
+        }
+        if (gap_max < x + w) {
+            hive_add_segment(state, gap_max, y, x + w, y, 0.0f, -1.0f);
+        }
+    } else {
+        hive_add_segment(state, x, y, x + w, y, 0.0f, -1.0f);
+    }
+
+    // Bottom side (1).
+    if (side == 1) {
+        float yb = y + h;
+        if (gap_min > x) {
+            hive_add_segment(state, x, yb, gap_min, yb, 0.0f, 1.0f);
+        }
+        if (gap_max < x + w) {
+            hive_add_segment(state, gap_max, yb, x + w, yb, 0.0f, 1.0f);
+        }
+    } else {
+        hive_add_segment(state, x, y + h, x + w, y + h, 0.0f, 1.0f);
+    }
+
+    // Left side (2).
+    if (side == 2) {
+        if (gap_min > y) {
+            hive_add_segment(state, x, y, x, gap_min, -1.0f, 0.0f);
+        }
+        if (gap_max < y + h) {
+            hive_add_segment(state, x, gap_max, x, y + h, -1.0f, 0.0f);
+        }
+    } else {
+        hive_add_segment(state, x, y, x, y + h, -1.0f, 0.0f);
+    }
+
+    // Right side (3).
+    if (side == 3) {
+        float xr = x + w;
+        if (gap_min > y) {
+            hive_add_segment(state, xr, y, xr, gap_min, 1.0f, 0.0f);
+        }
+        if (gap_max < y + h) {
+            hive_add_segment(state, xr, gap_max, xr, y + h, 1.0f, 0.0f);
+        }
+    } else {
+        hive_add_segment(state, x + w, y, x + w, y + h, 1.0f, 0.0f);
+    }
+}
+
+static int hive_resolve_segment(const SimState *state,
+                                const HiveSegment *seg,
+                                float radius,
+                                float *px,
+                                float *py,
+                                float *vx,
+                                float *vy) {
+    float ax = seg->ax;
+    float ay = seg->ay;
+    float bx = seg->bx;
+    float by = seg->by;
+
+    float abx = bx - ax;
+    float aby = by - ay;
+    float ab_len_sq = abx * abx + aby * aby;
+    if (ab_len_sq <= 1e-8f) {
+        return 0;
+    }
+
+    float apx = *px - ax;
+    float apy = *py - ay;
+    float t = (apx * abx + apy * aby) / ab_len_sq;
+    t = clampf(t, 0.0f, 1.0f);
+    float cx = ax + abx * t;
+    float cy = ay + aby * t;
+
+    float rx = *px - cx;
+    float ry = *py - cy;
+    float dist_sq = rx * rx + ry * ry;
+    float radius_sq = radius * radius;
+
+    if (dist_sq >= radius_sq) {
+        return 0;
+    }
+
+    float dist = sqrtf(dist_sq);
+    float nx;
+    float ny;
+    if (dist > 1e-6f) {
+        nx = rx / dist;
+        ny = ry / dist;
+    } else {
+        nx = seg->nx;
+        ny = seg->ny;
+        float n_len = sqrtf(nx * nx + ny * ny);
+        if (n_len <= 1e-6f) {
+            nx = 0.0f;
+            ny = -1.0f;
+        } else {
+            nx /= n_len;
+            ny /= n_len;
+        }
+    }
+
+    float penetration = radius - dist;
+    if (penetration < 0.0f) {
+        return 0;
+    }
+    penetration += state->hive_safety_margin;
+    *px += nx * penetration;
+    *py += ny * penetration;
+
+    float v_normal = (*vx) * nx + (*vy) * ny;
+    float vt_x = *vx - v_normal * nx;
+    float vt_y = *vy - v_normal * ny;
+
+    float new_vn = -state->hive_restitution * v_normal;
+    float new_vt_x = state->hive_tangent_damp * vt_x;
+    float new_vt_y = state->hive_tangent_damp * vt_y;
+
+    *vx = new_vn * nx + new_vt_x;
+    *vy = new_vn * ny + new_vt_y;
+    return 1;
+}
+
+static void hive_resolve_disc(const SimState *state,
+                              float radius,
+                              float *x,
+                              float *y,
+                              float *vx,
+                              float *vy) {
+    if (!state || !state->hive_enabled || state->hive_segment_count == 0) {
+        return;
+    }
+    int max_iters = state->hive_max_iters > 0 ? state->hive_max_iters : 1;
+    for (int iter = 0; iter < max_iters; ++iter) {
+        int collided = 0;
+        for (size_t si = 0; si < state->hive_segment_count; ++si) {
+            collided |= hive_resolve_segment(state, &state->hive_segments[si], radius, x, y, vx, vy);
+        }
+        if (!collided) {
+            break;
+        }
+    }
+}
+
 static void update_scratch(SimState *state) {
     if (!state || !state->scratch_xy) {
         return;
@@ -173,6 +433,18 @@ static void configure_from_params(SimState *state, const Params *params) {
     state->spawn_speed_std = params->motion_spawn_speed_std;
     state->spawn_mode = params->motion_spawn_mode;
     state->seed = params->rng_seed;
+    state->hive_rect_x = params->hive.rect_x;
+    state->hive_rect_y = params->hive.rect_y;
+    state->hive_rect_w = params->hive.rect_w;
+    state->hive_rect_h = params->hive.rect_h;
+    state->hive_entrance_side = params->hive.entrance_side;
+    state->hive_entrance_t = params->hive.entrance_t;
+    state->hive_entrance_width = params->hive.entrance_width;
+    state->hive_restitution = params->hive.restitution;
+    state->hive_tangent_damp = params->hive.tangent_damp;
+    state->hive_max_iters = params->hive.max_resolve_iters;
+    state->hive_safety_margin = params->hive.safety_margin;
+    sim_build_hive_segments(state);
 }
 
 static void reset_log_stats(SimState *state) {
@@ -275,6 +547,34 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
         state->radius[i] = bee_radius;
         size_t palette_index = (palette_offset + i) % palette_count;
         state->color_rgba[i] = palette[palette_index];
+
+        float age_days = rand_uniform01(&rng) * 25.0f;
+        state->age_days[i] = age_days;
+        state->t_state[i] = 0.0f;
+        state->energy[i] = 1.0f;
+        state->load_nectar[i] = 0.0f;
+        state->target_pos_x[i] = state->world_w * 0.75f;
+        state->target_pos_y[i] = state->world_h * 0.3f;
+        state->target_id[i] = -1;
+        state->topic_id[i] = -1;
+        state->topic_confidence[i] = 0;
+
+        BeeRole role = bee_pick_role(age_days, &rng);
+        state->role[i] = (uint8_t)role;
+
+        if (role == BEE_ROLE_FORAGER || role == BEE_ROLE_SCOUT) {
+            state->mode[i] = (uint8_t)BEE_MODE_FORAGING;
+            state->intent[i] = (uint8_t)BEE_INTENT_FIND_PATCH;
+        } else {
+            state->mode[i] = (uint8_t)BEE_MODE_INSIDE_MOVE;
+            state->intent[i] = (uint8_t)BEE_INTENT_REST;
+            state->target_pos_x[i] = state->hive_rect_w > 0.0f
+                                         ? state->hive_rect_x + state->hive_rect_w * 0.5f
+                                         : state->world_w * 0.35f;
+            state->target_pos_y[i] = state->hive_rect_h > 0.0f
+                                         ? state->hive_rect_y + state->hive_rect_h * 0.5f
+                                         : state->world_h * 0.55f;
+        }
     }
 
     if (state->count > 0) {
@@ -301,6 +601,18 @@ static void sim_release(SimState *state) {
     free_aligned(state->radius);
     free_aligned(state->color_rgba);
     free_aligned(state->scratch_xy);
+    free_aligned(state->age_days);
+    free_aligned(state->t_state);
+    free_aligned(state->energy);
+    free_aligned(state->load_nectar);
+    free_aligned(state->target_pos_x);
+    free_aligned(state->target_pos_y);
+    free_aligned(state->target_id);
+    free_aligned(state->topic_id);
+    free_aligned(state->topic_confidence);
+    free_aligned(state->role);
+    free_aligned(state->mode);
+    free_aligned(state->intent);
     free(state);
 }
 
@@ -339,9 +651,25 @@ bool sim_init(SimState **out_state, const Params *params) {
     state->radius = (float *)alloc_aligned(sizeof(float) * count);
     state->color_rgba = (uint32_t *)alloc_aligned(sizeof(uint32_t) * count);
     state->scratch_xy = (float *)alloc_aligned(sizeof(float) * count * 2u);
+    state->age_days = (float *)alloc_aligned(sizeof(float) * count);
+    state->t_state = (float *)alloc_aligned(sizeof(float) * count);
+    state->energy = (float *)alloc_aligned(sizeof(float) * count);
+    state->load_nectar = (float *)alloc_aligned(sizeof(float) * count);
+    state->target_pos_x = (float *)alloc_aligned(sizeof(float) * count);
+    state->target_pos_y = (float *)alloc_aligned(sizeof(float) * count);
+    state->target_id = (int32_t *)alloc_aligned(sizeof(int32_t) * count);
+    state->topic_id = (int16_t *)alloc_aligned(sizeof(int16_t) * count);
+    state->topic_confidence = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
+    state->role = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
+    state->mode = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
+    state->intent = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
 
     if (!state->x || !state->y || !state->vx || !state->vy || !state->heading ||
-        !state->radius || !state->color_rgba || !state->scratch_xy) {
+        !state->radius || !state->color_rgba || !state->scratch_xy ||
+        !state->age_days || !state->t_state || !state->energy || !state->load_nectar ||
+        !state->target_pos_x || !state->target_pos_y || !state->target_id ||
+        !state->topic_id || !state->topic_confidence || !state->role ||
+        !state->mode || !state->intent) {
         LOG_ERROR("sim_init: allocation failure for bee buffers");
         sim_release(state);
         return false;
@@ -387,6 +715,16 @@ void sim_tick(SimState *state, float dt_sec) {
         float heading = state->heading[i];
         float vx = state->vx[i];
         float vy = state->vy[i];
+        uint8_t prev_mode = state->mode[i];
+        uint8_t prev_intent = state->intent[i];
+        float prev_t_state = state->t_state[i];
+        float energy = state->energy[i];
+        float load = state->load_nectar[i];
+        uint8_t intent = prev_intent;
+        uint8_t mode = prev_mode;
+        float target_x = state->target_pos_x[i];
+        float target_y = state->target_pos_y[i];
+        int32_t target_id = state->target_id[i];
 
         if (jitter > 0.0f) {
             heading = wrap_angle(heading + jitter * dt_sec * rand_symmetric(&rng));
@@ -445,12 +783,61 @@ void sim_tick(SimState *state, float dt_sec) {
                 heading = rand_angle(&rng);
                 speed = min_speed;
             } else {
-                heading = wrap_angle(atan2f(vy, vx));
                 speed = clampf(speed, min_speed, max_speed);
             }
             vx = cosf(heading) * speed;
             vy = sinf(heading) * speed;
+        }
+
+        hive_resolve_disc(state, radius, &x, &y, &vx, &vy);
+
+        float speed_after = sqrtf(vx * vx + vy * vy);
+        bool inside_hive = state->hive_enabled &&
+                           x >= state->hive_rect_x &&
+                           x <= state->hive_rect_x + state->hive_rect_w &&
+                           y >= state->hive_rect_y &&
+                           y <= state->hive_rect_y + state->hive_rect_h;
+
+        if (inside_hive) {
+            energy += 0.05f * dt_sec;
+            load = fmaxf(0.0f, load - 0.2f * dt_sec);
         } else {
+            energy -= 0.03f * speed_after * dt_sec;
+            if (load < 1.0f && (prev_mode == BEE_MODE_FORAGING || prev_intent == BEE_INTENT_HARVEST)) {
+                load += 0.05f * dt_sec;
+            }
+        }
+        energy = clampf(energy, 0.0f, 1.0f);
+        load = clampf(load, 0.0f, 1.0f);
+
+        float hive_center_x = state->hive_rect_w > 0.0f ? state->hive_rect_x + state->hive_rect_w * 0.5f
+                                                        : world_w * 0.5f;
+        float hive_center_y = state->hive_rect_h > 0.0f ? state->hive_rect_y + state->hive_rect_h * 0.5f
+                                                        : world_h * 0.5f;
+        BeeDecisionContext bee_ctx = {
+            .inside_hive = inside_hive,
+            .energy = energy,
+            .load_nectar = load,
+            .role = state->role[i],
+            .previous_mode = prev_mode,
+            .previous_intent = prev_intent,
+            .hive_center_x = hive_center_x,
+            .hive_center_y = hive_center_y,
+            .world_width = world_w,
+            .world_height = world_h,
+            .forage_target_x = world_w * 0.75f,
+            .forage_target_y = world_h * 0.3f,
+        };
+        BeeDecisionOutput decision = {0};
+        bee_decide_next_action(&bee_ctx, &decision);
+
+        intent = decision.intent;
+        mode = decision.mode;
+        target_x = decision.target_x;
+        target_y = decision.target_y;
+        target_id = decision.target_id;
+
+        if (speed_after > 1e-6f) {
             heading = wrap_angle(atan2f(vy, vx));
         }
 
@@ -460,14 +847,28 @@ void sim_tick(SimState *state, float dt_sec) {
         state->vy[i] = vy;
         state->heading[i] = heading;
 
-        speed = sqrtf(vx * vx + vy * vy);
-        if (speed < speed_min_tick) {
-            speed_min_tick = speed;
+        if (speed_after < speed_min_tick) {
+            speed_min_tick = speed_after;
         }
-        if (speed > speed_max_tick) {
-            speed_max_tick = speed;
+        if (speed_after > speed_max_tick) {
+            speed_max_tick = speed_after;
         }
-        speed_sum += speed;
+        speed_sum += speed_after;
+
+        state->energy[i] = energy;
+        state->load_nectar[i] = load;
+        state->intent[i] = intent;
+        state->mode[i] = mode;
+        state->target_pos_x[i] = target_x;
+        state->target_pos_y[i] = target_y;
+        state->target_id[i] = target_id;
+        state->t_state[i] = (mode == prev_mode) ? prev_t_state + dt_sec : 0.0f;
+        state->age_days[i] += dt_sec / 86400.0f;
+        float conf = (float)state->topic_confidence[i];
+        conf -= dt_sec * 20.0f;
+        if (conf < 0.0f) conf = 0.0f;
+        if (conf > 255.0f) conf = 255.0f;
+        state->topic_confidence[i] = (uint8_t)(conf + 0.5f);
     }
 
     state->rng_state = rng;
@@ -556,6 +957,19 @@ void sim_apply_runtime_params(SimState *state, const Params *params) {
     }
     state->spawn_mode = params->motion_spawn_mode;
 
+    state->hive_rect_x = params->hive.rect_x;
+    state->hive_rect_y = params->hive.rect_y;
+    state->hive_rect_w = params->hive.rect_w;
+    state->hive_rect_h = params->hive.rect_h;
+    state->hive_entrance_side = params->hive.entrance_side;
+    state->hive_entrance_t = params->hive.entrance_t;
+    state->hive_entrance_width = params->hive.entrance_width;
+    state->hive_restitution = params->hive.restitution;
+    state->hive_tangent_damp = params->hive.tangent_damp;
+    state->hive_max_iters = params->hive.max_resolve_iters;
+    state->hive_safety_margin = params->hive.safety_margin;
+    sim_build_hive_segments(state);
+
     const float world_w = state->world_w;
     const float world_h = state->world_h;
 
@@ -640,4 +1054,62 @@ void sim_reset(SimState *state, uint64_t seed) {
 
 void sim_shutdown(SimState *state) {
     sim_release(state);
+}
+
+size_t sim_find_bee_near(const SimState *state, float world_x, float world_y, float radius_world) {
+    if (!state || state->count == 0 || radius_world <= 0.0f) {
+        return SIZE_MAX;
+    }
+    float best_dist_sq = radius_world * radius_world;
+    size_t best_index = SIZE_MAX;
+    for (size_t i = 0; i < state->count; ++i) {
+        float dx = state->x[i] - world_x;
+        float dy = state->y[i] - world_y;
+        float combined = radius_world + state->radius[i];
+        float limit_sq = combined * combined;
+        float dist_sq = dx * dx + dy * dy;
+        if (dist_sq <= limit_sq && dist_sq <= best_dist_sq) {
+            best_dist_sq = dist_sq;
+            best_index = i;
+        }
+    }
+    return best_index;
+}
+
+bool sim_get_bee_info(const SimState *state, size_t index, BeeDebugInfo *out_info) {
+    if (!state || !out_info || index >= state->count) {
+        return false;
+    }
+    BeeDebugInfo info = {0};
+    info.index = index;
+    info.pos_x = state->x[index];
+    info.pos_y = state->y[index];
+    info.vel_x = state->vx[index];
+    info.vel_y = state->vy[index];
+    info.speed = sqrtf(state->vx[index] * state->vx[index] + state->vy[index] * state->vy[index]);
+    info.radius = state->radius[index];
+    info.age_days = state->age_days[index];
+    info.state_time = state->t_state[index];
+    info.energy = state->energy[index];
+    info.load_nectar = state->load_nectar[index];
+    info.target_pos_x = state->target_pos_x[index];
+    info.target_pos_y = state->target_pos_y[index];
+    info.target_id = state->target_id[index];
+    info.topic_id = state->topic_id[index];
+    info.topic_confidence = state->topic_confidence[index];
+    info.role = state->role[index];
+    info.mode = state->mode[index];
+    info.intent = state->intent[index];
+
+    bool inside_hive = false;
+    if (state->hive_enabled && state->hive_rect_w > 0.0f && state->hive_rect_h > 0.0f) {
+        inside_hive = (info.pos_x >= state->hive_rect_x &&
+                       info.pos_x <= state->hive_rect_x + state->hive_rect_w &&
+                       info.pos_y >= state->hive_rect_y &&
+                       info.pos_y <= state->hive_rect_y + state->hive_rect_h);
+    }
+    info.inside_hive = inside_hive;
+
+    *out_info = info;
+    return true;
 }

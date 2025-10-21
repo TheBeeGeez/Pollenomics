@@ -10,6 +10,7 @@ add_executable(bee_sim
   src/main.c
   src/app/app.c
   src/config/params.c
+  src/sim/bee.c
   src/sim/sim.c
   src/platform/sdl_io.c
   src/render/gl_backend.c

@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "bee.h"
 #include "params.h"
 #include "render.h"
 
@@ -35,5 +36,11 @@ void sim_apply_runtime_params(SimState *state, const Params *params);
 
 void sim_shutdown(SimState *state);
 // Frees all simulation resources; safe to call on null.
+
+size_t sim_find_bee_near(const SimState *state, float world_x, float world_y, float radius_world);
+// Returns the index of the closest bee within radius_world (inclusive), or SIZE_MAX when none.
+
+bool sim_get_bee_info(const SimState *state, size_t index, BeeDebugInfo *out_info);
+// Populates BeeDebugInfo for the given index; returns false if out of range.
 
 #endif  // SIM_H

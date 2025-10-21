@@ -79,6 +79,17 @@ typedef struct {
     GLuint vao;
     GLuint vbo;
     GLint resolution_uniform;
+
+    bool show_hive_overlay;
+    bool has_camera;
+    float cam_center_x;
+    float cam_center_y;
+    float cam_zoom;
+    int fb_width;
+    int fb_height;
+    bool selected_valid;
+    bool selected_panel_open;
+    BeeDebugInfo selected_bee;
 } UiState;
 
 static UiState g_ui;
@@ -202,6 +213,207 @@ static float ui_measure_text(const char *text) {
     return max_width;
 }
 
+static const char *ui_role_name(uint8_t role) {
+    switch (role) {
+        case BEE_ROLE_NURSE: return "NURSE";
+        case BEE_ROLE_HOUSEKEEPER: return "HOUSEKEEPER";
+        case BEE_ROLE_STORAGE: return "STORAGE";
+        case BEE_ROLE_FORAGER: return "FORAGER";
+        case BEE_ROLE_SCOUT: return "SCOUT";
+        case BEE_ROLE_GUARD: return "GUARD";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char *ui_mode_name(uint8_t mode) {
+    switch (mode) {
+        case BEE_MODE_IDLE: return "IDLE";
+        case BEE_MODE_FORAGING: return "FORAGING";
+        case BEE_MODE_RETURNING: return "RETURNING";
+        case BEE_MODE_APPROACH_ENTRANCE: return "APPROACH ENTRANCE";
+        case BEE_MODE_INSIDE_MOVE: return "INSIDE MOVE";
+        case BEE_MODE_UNLOAD_WAIT: return "UNLOAD WAIT";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char *ui_intent_name(uint8_t intent) {
+    switch (intent) {
+        case BEE_INTENT_FIND_PATCH: return "FIND PATCH";
+        case BEE_INTENT_HARVEST: return "HARVEST";
+        case BEE_INTENT_RETURN_HOME: return "RETURN HOME";
+        case BEE_INTENT_UNLOAD: return "UNLOAD";
+        case BEE_INTENT_REST: return "REST";
+        case BEE_INTENT_EXPLORE: return "EXPLORE";
+        default: return "UNKNOWN";
+    }
+}
+
+static void ui_world_to_screen(float wx, float wy, float *sx, float *sy) {
+    float zoom = g_ui.cam_zoom > 0.0f ? g_ui.cam_zoom : 1.0f;
+    float cx = g_ui.cam_center_x;
+    float cy = g_ui.cam_center_y;
+    *sx = (wx - cx) * zoom + 0.5f * (float)g_ui.fb_width;
+    *sy = (wy - cy) * zoom + 0.5f * (float)g_ui.fb_height;
+}
+
+static void ui_draw_hive_segment_horizontal(float ax, float bx, float y_world, UiColor color, float thickness) {
+    if (fabsf(bx - ax) < 1e-4f) {
+        return;
+    }
+    float sx0, sy0, sx1, sy1;
+    ui_world_to_screen(ax, y_world, &sx0, &sy0);
+    ui_world_to_screen(bx, y_world, &sx1, &sy1);
+    float width = fabsf(sx1 - sx0);
+    if (width < 1.0f) {
+        return;
+    }
+    float x = fminf(sx0, sx1);
+    float y = sy0 - 0.5f * thickness;
+    ui_add_rect(x, y, width, thickness, color);
+}
+
+static void ui_draw_hive_segment_vertical(float ay, float by, float x_world, UiColor color, float thickness) {
+    if (fabsf(by - ay) < 1e-4f) {
+        return;
+    }
+    float sx0, sy0, sx1, sy1;
+    ui_world_to_screen(x_world, ay, &sx0, &sy0);
+    ui_world_to_screen(x_world, by, &sx1, &sy1);
+    float height = fabsf(sy1 - sy0);
+    if (height < 1.0f) {
+        return;
+    }
+    float y = fminf(sy0, sy1);
+    float x = sx0 - 0.5f * thickness;
+    ui_add_rect(x, y, thickness, height, color);
+}
+
+static void ui_draw_hive_overlay(void) {
+    if (!g_ui.show_hive_overlay || !g_ui.runtime || !g_ui.has_camera) {
+        return;
+    }
+    if (g_ui.fb_width <= 0 || g_ui.fb_height <= 0) {
+        return;
+    }
+    const Params *p = g_ui.runtime;
+    if (p->hive.rect_w <= 0.0f || p->hive.rect_h <= 0.0f) {
+        return;
+    }
+
+    const float x = p->hive.rect_x;
+    const float y = p->hive.rect_y;
+    const float w = p->hive.rect_w;
+    const float h = p->hive.rect_h;
+
+    const int side = p->hive.entrance_side;
+    const float half_gap = p->hive.entrance_width * 0.5f;
+    float gap_min = 0.0f;
+    float gap_max = 0.0f;
+    if (side == 0 || side == 1) {
+        float gap_center = x + p->hive.entrance_t * w;
+        gap_min = fmaxf(x, gap_center - half_gap);
+        gap_max = fminf(x + w, gap_center + half_gap);
+    } else {
+        float gap_center = y + p->hive.entrance_t * h;
+        gap_min = fmaxf(y, gap_center - half_gap);
+        gap_max = fminf(y + h, gap_center + half_gap);
+    }
+
+    UiColor wall_color = ui_color_rgba(0.95f, 0.75f, 0.15f, 0.9f);
+    UiColor gap_color = ui_color_rgba(0.2f, 0.85f, 0.35f, 0.9f);
+    float thickness = fmaxf(2.0f, g_ui.cam_zoom * 0.8f);
+
+    // Top
+    if (side == 0) {
+        if (gap_min - x > 1e-4f) {
+            ui_draw_hive_segment_horizontal(x, gap_min, y, wall_color, thickness);
+        }
+        if (x + w - gap_max > 1e-4f) {
+            ui_draw_hive_segment_horizontal(gap_max, x + w, y, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_horizontal(gap_min, gap_max, y, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_horizontal(x, x + w, y, wall_color, thickness);
+    }
+
+    // Bottom
+    float y_bottom = y + h;
+    if (side == 1) {
+        if (gap_min - x > 1e-4f) {
+            ui_draw_hive_segment_horizontal(x, gap_min, y_bottom, wall_color, thickness);
+        }
+        if (x + w - gap_max > 1e-4f) {
+            ui_draw_hive_segment_horizontal(gap_max, x + w, y_bottom, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_horizontal(gap_min, gap_max, y_bottom, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_horizontal(x, x + w, y_bottom, wall_color, thickness);
+    }
+
+    // Left
+    if (side == 2) {
+        if (gap_min - y > 1e-4f) {
+            ui_draw_hive_segment_vertical(y, gap_min, x, wall_color, thickness);
+        }
+        if (y + h - gap_max > 1e-4f) {
+            ui_draw_hive_segment_vertical(gap_max, y + h, x, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_vertical(gap_min, gap_max, x, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_vertical(y, y + h, x, wall_color, thickness);
+    }
+
+    // Right
+    float x_right = x + w;
+    if (side == 3) {
+        if (gap_min - y > 1e-4f) {
+            ui_draw_hive_segment_vertical(y, gap_min, x_right, wall_color, thickness);
+        }
+        if (y + h - gap_max > 1e-4f) {
+            ui_draw_hive_segment_vertical(gap_max, y + h, x_right, wall_color, thickness);
+        }
+        if (gap_max > gap_min) {
+            ui_draw_hive_segment_vertical(gap_min, gap_max, x_right, gap_color, thickness);
+        }
+    } else {
+        ui_draw_hive_segment_vertical(y, y + h, x_right, wall_color, thickness);
+    }
+}
+
+void ui_set_viewport(const RenderCamera *camera, int framebuffer_width, int framebuffer_height) {
+    g_ui.fb_width = framebuffer_width;
+    g_ui.fb_height = framebuffer_height;
+    if (!camera || framebuffer_width <= 0 || framebuffer_height <= 0) {
+        g_ui.has_camera = false;
+        return;
+    }
+    g_ui.cam_center_x = camera->center_world[0];
+    g_ui.cam_center_y = camera->center_world[1];
+    g_ui.cam_zoom = camera->zoom > 0.0f ? camera->zoom : 1.0f;
+    g_ui.has_camera = true;
+}
+
+void ui_enable_hive_overlay(bool enabled) {
+    g_ui.show_hive_overlay = enabled;
+}
+
+void ui_set_selected_bee(const BeeDebugInfo *info, bool valid) {
+    if (valid && info) {
+        g_ui.selected_bee = *info;
+        g_ui.selected_valid = true;
+        g_ui.selected_panel_open = true;
+    } else {
+        g_ui.selected_valid = false;
+        g_ui.selected_panel_open = false;
+    }
+}
 #define GLYPH(ch, r0, r1, r2, r3, r4, r5, r6) \
     { ch, { r0, r1, r2, r3, r4, r5, r6 } }
 
@@ -324,6 +536,101 @@ static void ui_draw_text(float x, float y, const char *text, UiColor color) {
     }
 }
 
+static void ui_draw_selected_bee_panel(void) {
+    if (!g_ui.selected_panel_open || !g_ui.selected_valid) {
+        return;
+    }
+    if (g_ui.fb_width <= 0 || g_ui.fb_height <= 0) {
+        return;
+    }
+
+    typedef struct {
+        char text[128];
+        UiColor color;
+        float spacing_after;
+    } BeePanelLine;
+
+    BeePanelLine lines[12];
+    size_t line_count = 0;
+    const float padding = 16.0f;
+    const float min_panel_width = 220.0f;
+
+    UiColor bg = ui_color_rgba(0.10f, 0.10f, 0.14f, 0.94f);
+    UiColor header = ui_color_rgba(0.95f, 0.95f, 0.98f, 1.0f);
+    UiColor text_color = ui_color_rgba(0.85f, 0.88f, 0.92f, 1.0f);
+    UiColor accent = ui_color_rgba(0.30f, 0.65f, 0.95f, 1.0f);
+
+    const BeeDebugInfo *info = &g_ui.selected_bee;
+    char line[128];
+
+    #define ADD_LINE(TEXT_EXPR, COLOR_EXPR, SPACING_VALUE)                                \
+        do {                                                                              \
+            if (line_count < sizeof(lines) / sizeof(lines[0])) {                          \
+                strncpy(lines[line_count].text, (TEXT_EXPR), sizeof(lines[line_count].text) - 1); \
+                lines[line_count].text[sizeof(lines[line_count].text) - 1] = '\0';        \
+                lines[line_count].color = (COLOR_EXPR);                                   \
+                lines[line_count].spacing_after = (SPACING_VALUE);                        \
+                ++line_count;                                                             \
+            }                                                                             \
+        } while (0)
+
+    ADD_LINE("BEE INFO", header, 24.0f);
+
+    snprintf(line, sizeof(line), "BEE #%zu", info->index);
+    ADD_LINE(line, accent, 20.0f);
+
+    snprintf(line, sizeof(line), "ROLE: %s", ui_role_name(info->role));
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "INTENT: %s", ui_intent_name(info->intent));
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "MODE: %s", ui_mode_name(info->mode));
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "STATUS: %s HIVE", info->inside_hive ? "INSIDE" : "OUTSIDE");
+    ADD_LINE(line, text_color, 18.0f);
+
+    int energy_pct = (int)(info->energy * 100.0f + 0.5f);
+    int load_pct = (int)(info->load_nectar * 100.0f + 0.5f);
+    snprintf(line, sizeof(line), "ENERGY %d%%  |  NECTAR %d%%", energy_pct, load_pct);
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "SPEED %.1f PX/S  |  AGE %.1f DAYS", info->speed, info->age_days);
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "LOCATION: (%.1f, %.1f)", info->pos_x, info->pos_y);
+    ADD_LINE(line, text_color, 24.0f);
+
+    #undef ADD_LINE
+
+    float max_width = 0.0f;
+    for (size_t i = 0; i < line_count; ++i) {
+        float width = ui_measure_text(lines[i].text);
+        if (width > max_width) {
+            max_width = width;
+        }
+    }
+
+    float panel_width = fmaxf(min_panel_width, max_width + padding * 2.0f);
+    float origin_y = UI_PANEL_MARGIN;
+    float origin_x = (float)g_ui.fb_width - panel_width - UI_PANEL_MARGIN;
+    if (origin_x < UI_PANEL_MARGIN) {
+        origin_x = UI_PANEL_MARGIN;
+    }
+    float text_x = origin_x + padding;
+    float cursor_y = origin_y + 18.0f;
+
+    size_t bg_idx = ui_add_rect(origin_x, origin_y, panel_width, 1.0f, bg);
+
+    for (size_t i = 0; i < line_count; ++i) {
+        ui_draw_text(text_x, cursor_y, lines[i].text, lines[i].color);
+        cursor_y += lines[i].spacing_after;
+    }
+
+    float panel_h = (cursor_y + 12.0f) - origin_y;
+    ui_update_rect(bg_idx, origin_x, origin_y, panel_width, panel_h);
+}
 static GLuint ui_create_shader(const char *vs_src, const char *fs_src) {
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vs_src, NULL);
@@ -368,6 +675,11 @@ void ui_init(void) {
     ui_build_glyph_cache();
     g_ui.program = ui_create_shader(UI_VERTEX_SHADER, UI_FRAGMENT_SHADER);
     g_ui.resolution_uniform = glGetUniformLocation(g_ui.program, "u_resolution");
+    g_ui.show_hive_overlay = true;
+    g_ui.has_camera = false;
+    g_ui.cam_zoom = 1.0f;
+    g_ui.selected_valid = false;
+    g_ui.selected_panel_open = false;
 
     glGenVertexArrays(1, &g_ui.vao);
     glGenBuffers(1, &g_ui.vbo);
@@ -444,6 +756,8 @@ static void ui_begin_frame(const Input *input) {
     UiColor border = ui_color_rgba(0.2f, 0.2f, 0.2f, 1.0f);
     UiColor text = ui_color_rgba(1.0f, 1.0f, 1.0f, 1.0f);
 
+    ui_draw_hive_overlay();
+
     UiRect hamburger = {UI_PANEL_MARGIN, UI_PANEL_MARGIN, UI_HAMBURGER_SIZE, UI_HAMBURGER_SIZE};
     bool hamburger_hover = ui_rect_contains(&hamburger, g_ui.mouse_x, g_ui.mouse_y);
     UiColor burger_col = hamburger_hover ? accent : ui_color_rgba(0.9f, 0.9f, 0.9f, 1.0f);
@@ -464,6 +778,7 @@ static void ui_begin_frame(const Input *input) {
         g_ui.wants_mouse = g_ui.capturing_mouse;
         g_ui.wants_keyboard = false;
         g_ui.prev_mouse_down = mouse_down;
+        ui_draw_selected_bee_panel();
         return;
     }
 
@@ -743,6 +1058,8 @@ static void ui_begin_frame(const Input *input) {
     g_ui.mouse_over_panel = ui_rect_contains(&panel_rect, g_ui.mouse_x, g_ui.mouse_y);
     g_ui.wants_mouse = g_ui.capturing_mouse || g_ui.mouse_over_panel;
     g_ui.wants_keyboard = true;
+
+    ui_draw_selected_bee_panel();
 
     if (g_ui.active_slider >= 0 && !mouse_down) {
         g_ui.active_slider = -1;

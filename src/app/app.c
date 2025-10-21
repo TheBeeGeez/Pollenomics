@@ -1,5 +1,6 @@
 #include "app.h"
 #include <math.h>
+#include <stddef.h>
 #include "params.h"
 #include "platform.h"
 #include "render.h"
@@ -22,6 +23,7 @@ static int g_fb_width = 0;
 static int g_fb_height = 0;
 static float g_sim_fixed_dt = 1.0f / 120.0f;
 static const double g_sim_max_accumulator = 0.25;
+static size_t g_selected_bee_index = SIZE_MAX;
 static float clampf(float v, float lo, float hi) {
     if (v < lo) {
         return lo;
@@ -297,6 +299,8 @@ void app_frame(void) {
     Timing timing = (Timing){0};
     plat_pump(&g_platform, &input, &timing);
 
+    ui_set_viewport(&g_camera, g_fb_width, g_fb_height);
+
     UiActions ui_actions = ui_update(&input, g_sim_paused, timing.dt_sec);
     bool ui_mouse = ui_wants_mouse();
     bool ui_keyboard = ui_wants_keyboard();
@@ -329,6 +333,35 @@ void app_frame(void) {
         step_requested = true;
     }
     step_requested = step_requested && g_sim_paused;
+
+    if (!ui_mouse && input.mouse_left_pressed) {
+        float zoom = g_camera.zoom > 0.0f ? g_camera.zoom : 1.0f;
+        float half_w = 0.5f * (float)g_fb_width;
+        float half_h = 0.5f * (float)g_fb_height;
+        float world_x = (input.mouse_x_px - half_w) / zoom + g_camera.center_world[0];
+        float world_y = (input.mouse_y_px - half_h) / zoom + g_camera.center_world[1];
+        float pick_radius_px = 18.0f;
+        float pick_radius_world = pick_radius_px / zoom;
+        if (g_sim) {
+            size_t bee_index = sim_find_bee_near(g_sim, world_x, world_y, pick_radius_world);
+            if (bee_index != SIZE_MAX) {
+                BeeDebugInfo info;
+                if (sim_get_bee_info(g_sim, bee_index, &info)) {
+                    g_selected_bee_index = bee_index;
+                    ui_set_selected_bee(&info, true);
+                } else {
+                    g_selected_bee_index = SIZE_MAX;
+                    ui_set_selected_bee(NULL, false);
+                }
+            } else {
+                g_selected_bee_index = SIZE_MAX;
+                ui_set_selected_bee(NULL, false);
+            }
+        } else {
+            g_selected_bee_index = SIZE_MAX;
+            ui_set_selected_bee(NULL, false);
+        }
+    }
 
     Input camera_input = input;
     if (ui_mouse) {
@@ -421,6 +454,18 @@ void app_frame(void) {
     RenderView view = (RenderView){0};
     if (g_sim) {
         view = sim_build_view(g_sim);
+        if (g_selected_bee_index != SIZE_MAX) {
+            BeeDebugInfo info;
+            if (sim_get_bee_info(g_sim, g_selected_bee_index, &info)) {
+                ui_set_selected_bee(&info, true);
+            } else {
+                g_selected_bee_index = SIZE_MAX;
+                ui_set_selected_bee(NULL, false);
+            }
+        }
+    } else if (g_selected_bee_index != SIZE_MAX) {
+        g_selected_bee_index = SIZE_MAX;
+        ui_set_selected_bee(NULL, false);
     }
     render_set_camera(&g_render, &g_camera);
     render_frame(&g_render, &view);
