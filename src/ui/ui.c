@@ -544,83 +544,89 @@ static void ui_draw_selected_bee_panel(void) {
         return;
     }
 
-    const float panel_width = 260.0f;
-    float origin_x = (float)g_ui.fb_width - panel_width - UI_PANEL_MARGIN;
-    if (origin_x < UI_PANEL_MARGIN) {
-        origin_x = UI_PANEL_MARGIN;
-    }
-    float origin_y = UI_PANEL_MARGIN;
+    typedef struct {
+        char text[128];
+        UiColor color;
+        float spacing_after;
+    } BeePanelLine;
+
+    BeePanelLine lines[12];
+    size_t line_count = 0;
+    const float padding = 16.0f;
+    const float min_panel_width = 220.0f;
+
     UiColor bg = ui_color_rgba(0.10f, 0.10f, 0.14f, 0.94f);
     UiColor header = ui_color_rgba(0.95f, 0.95f, 0.98f, 1.0f);
     UiColor text_color = ui_color_rgba(0.85f, 0.88f, 0.92f, 1.0f);
     UiColor accent = ui_color_rgba(0.30f, 0.65f, 0.95f, 1.0f);
 
-    size_t bg_idx = ui_add_rect(origin_x, origin_y, panel_width, 1.0f, bg);
-
-    float cursor_y = origin_y + 18.0f;
-    float text_x = origin_x + 16.0f;
-    char line[128];
     const BeeDebugInfo *info = &g_ui.selected_bee;
+    char line[128];
 
-    ui_draw_text(text_x, cursor_y, "BEE DETAILS", header);
-    cursor_y += 22.0f;
+    #define ADD_LINE(TEXT_EXPR, COLOR_EXPR, SPACING_VALUE)                                \
+        do {                                                                              \
+            if (line_count < sizeof(lines) / sizeof(lines[0])) {                          \
+                strncpy(lines[line_count].text, (TEXT_EXPR), sizeof(lines[line_count].text) - 1); \
+                lines[line_count].text[sizeof(lines[line_count].text) - 1] = '\0';        \
+                lines[line_count].color = (COLOR_EXPR);                                   \
+                lines[line_count].spacing_after = (SPACING_VALUE);                        \
+                ++line_count;                                                             \
+            }                                                                             \
+        } while (0)
 
-    snprintf(line, sizeof(line), "ID #%zu", info->index);
-    ui_draw_text(text_x, cursor_y, line, accent);
-    cursor_y += 20.0f;
+    ADD_LINE("BEE INFO", header, 24.0f);
 
-    snprintf(line, sizeof(line), "Role: %s", ui_role_name(info->role));
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    snprintf(line, sizeof(line), "BEE #%zu", info->index);
+    ADD_LINE(line, accent, 20.0f);
 
-    snprintf(line, sizeof(line), "Mode: %s", ui_mode_name(info->mode));
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    snprintf(line, sizeof(line), "ROLE: %s", ui_role_name(info->role));
+    ADD_LINE(line, text_color, 18.0f);
 
-    snprintf(line, sizeof(line), "Intent: %s", ui_intent_name(info->intent));
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 24.0f;
+    snprintf(line, sizeof(line), "INTENT: %s", ui_intent_name(info->intent));
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "MODE: %s", ui_mode_name(info->mode));
+    ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "STATUS: %s HIVE", info->inside_hive ? "INSIDE" : "OUTSIDE");
+    ADD_LINE(line, text_color, 18.0f);
 
     int energy_pct = (int)(info->energy * 100.0f + 0.5f);
     int load_pct = (int)(info->load_nectar * 100.0f + 0.5f);
-    snprintf(line, sizeof(line), "Energy: %d%%", energy_pct);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    snprintf(line, sizeof(line), "ENERGY %d%%  |  NECTAR %d%%", energy_pct, load_pct);
+    ADD_LINE(line, text_color, 18.0f);
 
-    snprintf(line, sizeof(line), "Nectar Load: %d%%", load_pct);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    snprintf(line, sizeof(line), "SPEED %.1f PX/S  |  AGE %.1f DAYS", info->speed, info->age_days);
+    ADD_LINE(line, text_color, 18.0f);
 
-    snprintf(line, sizeof(line), "Speed: %.1f px/s", info->speed);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    snprintf(line, sizeof(line), "LOCATION: (%.1f, %.1f)", info->pos_x, info->pos_y);
+    ADD_LINE(line, text_color, 24.0f);
 
-    snprintf(line, sizeof(line), "Age: %.1f days", info->age_days);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    #undef ADD_LINE
 
-    snprintf(line, sizeof(line), "State time: %.2f s", info->state_time);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    float max_width = 0.0f;
+    for (size_t i = 0; i < line_count; ++i) {
+        float width = ui_measure_text(lines[i].text);
+        if (width > max_width) {
+            max_width = width;
+        }
+    }
 
-    snprintf(line, sizeof(line), "Position: (%.1f, %.1f)", info->pos_x, info->pos_y);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    float panel_width = fmaxf(min_panel_width, max_width + padding * 2.0f);
+    float origin_y = UI_PANEL_MARGIN;
+    float origin_x = (float)g_ui.fb_width - panel_width - UI_PANEL_MARGIN;
+    if (origin_x < UI_PANEL_MARGIN) {
+        origin_x = UI_PANEL_MARGIN;
+    }
+    float text_x = origin_x + padding;
+    float cursor_y = origin_y + 18.0f;
 
-    snprintf(line, sizeof(line), "Target: (%.1f, %.1f)", info->target_pos_x, info->target_pos_y);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
+    size_t bg_idx = ui_add_rect(origin_x, origin_y, panel_width, 1.0f, bg);
 
-    snprintf(line, sizeof(line), "Target ID: %d", info->target_id);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
-
-    snprintf(line, sizeof(line), "Topic ID: %d (conf %u)", info->topic_id, info->topic_confidence);
-    ui_draw_text(text_x, cursor_y, line, text_color);
-    cursor_y += 18.0f;
-
-    ui_draw_text(text_x, cursor_y, info->inside_hive ? "Inside Hive" : "Outside", text_color);
-    cursor_y += 24.0f;
+    for (size_t i = 0; i < line_count; ++i) {
+        ui_draw_text(text_x, cursor_y, lines[i].text, lines[i].color);
+        cursor_y += lines[i].spacing_after;
+    }
 
     float panel_h = (cursor_y + 12.0f) - origin_y;
     ui_update_rect(bg_idx, origin_x, origin_y, panel_width, panel_h);
