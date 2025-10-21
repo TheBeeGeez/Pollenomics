@@ -1,9 +1,9 @@
-git #include "bee.h"
+#include "bee.h"
 
 static float bee_rand_uniform01(uint64_t *state) {
     uint64_t x = *state;
     x ^= x << 13;
-    x ^= x >> 7;
+    x ^= x >> 7;git 
     x ^= x << 17;
     *state = x;
     return (float)((x >> 11) * (1.0 / 9007199254740992.0));
