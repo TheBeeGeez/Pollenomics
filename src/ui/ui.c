@@ -104,6 +104,10 @@ typedef struct {
     bool selected_valid;
     bool selected_panel_open;
     BeeDebugInfo selected_bee;
+    float panel_scroll;
+    float panel_content_height;
+    float panel_visible_height;
+    float panel_last_width;
 } UiState;
 
 static UiState g_ui;
@@ -133,6 +137,8 @@ static UiColor ui_color_rgba(float r, float g, float b, float a) {
     return c;
 }
 
+static bool ui_range_intersects(float y, float h, float top, float bottom);
+
 static float ui_draw_slider_group(const SliderSpec *sliders,
                                   size_t slider_count,
                                   float text_x,
@@ -141,20 +147,29 @@ static float ui_draw_slider_group(const SliderSpec *sliders,
                                   UiColor text_color,
                                   float *panel_max_x,
                                   bool mouse_pressed,
-                                  bool mouse_down) {
+                                  bool mouse_down,
+                                  float scroll,
+                                  float view_top,
+                                  float view_bottom) {
     for (size_t i = 0; i < slider_count; ++i) {
         const SliderSpec *spec = &sliders[i];
-        ui_draw_text(text_x, cursor_y, spec->label, text_color);
+        float label_y = cursor_y - scroll;
+        if (ui_range_intersects(label_y, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, label_y, spec->label, text_color);
+        }
         if (panel_max_x) {
             float text_width = ui_measure_text(spec->label);
             if (text_x + text_width > *panel_max_x) {
                 *panel_max_x = text_x + text_width;
             }
         }
-        UiRect slider_rect = {text_x, cursor_y + 18.0f, slider_width, UI_SLIDER_HEIGHT};
-        bool hovered = ui_rect_contains(&slider_rect, g_ui.mouse_x, g_ui.mouse_y);
-        ui_add_rect(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h,
-                    ui_color_rgba(0.15f, 0.15f, 0.18f, 0.95f));
+        UiRect slider_rect = {text_x, cursor_y + 18.0f - scroll, slider_width, UI_SLIDER_HEIGHT};
+        bool slider_visible = ui_range_intersects(slider_rect.y, slider_rect.h, view_top, view_bottom);
+        bool hovered = slider_visible && ui_rect_contains(&slider_rect, g_ui.mouse_x, g_ui.mouse_y);
+        if (slider_visible) {
+            ui_add_rect(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h,
+                        ui_color_rgba(0.15f, 0.15f, 0.18f, 0.95f));
+        }
         if (panel_max_x) {
             float edge = slider_rect.x + slider_rect.w;
             if (edge > *panel_max_x) {
@@ -168,10 +183,14 @@ static float ui_draw_slider_group(const SliderSpec *sliders,
         float fill_w = slider_rect.w * ratio;
         UiColor track = hovered ? ui_color_rgba(0.2f, 0.4f, 0.7f, 1.0f)
                                 : ui_color_rgba(0.25f, 0.25f, 0.3f, 1.0f);
-        ui_add_rect(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, track);
+        if (slider_visible) {
+            ui_add_rect(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, track);
+        }
         float knob_x = slider_rect.x + fill_w - 6.0f;
-        ui_add_rect(knob_x, slider_rect.y - 2.0f, 12.0f, slider_rect.h + 4.0f,
-                    ui_color_rgba(0.9f, 0.9f, 0.9f, 1.0f));
+        if (slider_visible) {
+            ui_add_rect(knob_x, slider_rect.y - 2.0f, 12.0f, slider_rect.h + 4.0f,
+                        ui_color_rgba(0.9f, 0.9f, 0.9f, 1.0f));
+        }
 
         bool active = g_ui.active_slider == spec->id;
         if (hovered && mouse_pressed) {
@@ -214,7 +233,10 @@ static float ui_draw_slider_group(const SliderSpec *sliders,
         char buffer[32];
         snprintf(buffer, sizeof(buffer), "%.1f", *spec->value);
         float value_x = slider_rect.x + slider_rect.w + 10.0f;
-        ui_draw_text(value_x, slider_rect.y - 2.0f, buffer, text_color);
+        float value_y = slider_rect.y - 2.0f;
+        if (ui_range_intersects(value_y, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(value_x, value_y, buffer, text_color);
+        }
         if (panel_max_x) {
             float val_width = ui_measure_text(buffer);
             float edge = value_x + val_width;
@@ -229,6 +251,12 @@ static float ui_draw_slider_group(const SliderSpec *sliders,
 
 static bool ui_rect_contains(const UiRect *rect, float px, float py) {
     return px >= rect->x && px <= rect->x + rect->w && py >= rect->y && py <= rect->y + rect->h;
+}
+
+static bool ui_range_intersects(float y, float h, float top, float bottom) {
+    float min_y = y;
+    float max_y = y + h;
+    return max_y >= top && min_y <= bottom;
 }
 
 static void ui_reserve_vertices(size_t additional) {
@@ -793,6 +821,10 @@ void ui_init(void) {
     g_ui.cam_zoom = 1.0f;
     g_ui.selected_valid = false;
     g_ui.selected_panel_open = false;
+    g_ui.panel_scroll = 0.0f;
+    g_ui.panel_content_height = 0.0f;
+    g_ui.panel_visible_height = 0.0f;
+    g_ui.panel_last_width = UI_PANEL_WIDTH;
 
     glGenVertexArrays(1, &g_ui.vao);
     glGenBuffers(1, &g_ui.vbo);
@@ -891,19 +923,52 @@ static void ui_begin_frame(const Input *input) {
         g_ui.wants_mouse = g_ui.capturing_mouse;
         g_ui.wants_keyboard = false;
         g_ui.prev_mouse_down = mouse_down;
+        g_ui.panel_scroll = 0.0f;
+        g_ui.panel_content_height = 0.0f;
         ui_draw_selected_bee_panel();
         return;
     }
+
+    float view_height = (float)g_ui.fb_height - panel_rect.y - UI_PANEL_MARGIN;
+    if (view_height < 200.0f) {
+        view_height = 200.0f;
+    }
+    float max_view_height = (float)g_ui.fb_height - panel_rect.y;
+    if (max_view_height < 80.0f) {
+        max_view_height = 80.0f;
+    }
+    if (view_height > max_view_height) {
+        view_height = max_view_height;
+    }
+    float prev_panel_width = g_ui.panel_last_width > 0.0f ? g_ui.panel_last_width : UI_PANEL_WIDTH;
+    float max_prev_scroll = fmaxf(0.0f, g_ui.panel_content_height - view_height);
+    if (input && input->wheel_y != 0) {
+        float mx = g_ui.mouse_x;
+        float my = g_ui.mouse_y;
+        bool over_panel = mx >= panel_rect.x && mx <= panel_rect.x + prev_panel_width &&
+                          my >= panel_rect.y && my <= panel_rect.y + view_height;
+        if (over_panel || g_ui.capturing_mouse || g_ui.mouse_over_panel) {
+            g_ui.panel_scroll -= (float)input->wheel_y * 30.0f;
+        }
+    }
+    g_ui.panel_scroll = ui_clampf(g_ui.panel_scroll, 0.0f, max_prev_scroll);
+    g_ui.panel_visible_height = view_height;
+
+    float scroll = g_ui.panel_scroll;
+    float view_top = panel_rect.y;
+    float view_bottom = view_top + view_height;
 
     float cursor_y = panel_rect.y + 18.0f;
     float content_width = UI_PANEL_WIDTH - 40.0f;
     float panel_max_x = panel_rect.x + UI_PANEL_WIDTH;
 
-    size_t panel_bg_start = ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, 520.0f, panel_bg);
-    size_t panel_border_start = ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, 520.0f, border);
+    size_t panel_bg_start = ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, view_height, panel_bg);
+    size_t panel_border_start = ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, view_height, border);
 
     float text_x = panel_rect.x + 20.0f;
-    ui_draw_text(text_x, cursor_y, "SIM CONTROLS", text);
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "SIM CONTROLS", text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("SIM CONTROLS"));
     cursor_y += 24.0f;
 
@@ -933,9 +998,14 @@ static void ui_begin_frame(const Input *input) {
                                     text,
                                     &panel_max_x,
                                     mouse_pressed,
-                                    mouse_down);
+                                    mouse_down,
+                                    scroll,
+                                    view_top,
+                                    view_bottom);
 
-    ui_draw_text(text_x, cursor_y, "FORAGING", text);
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "FORAGING", text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("FORAGING"));
     cursor_y += 24.0f;
 
@@ -965,7 +1035,10 @@ static void ui_begin_frame(const Input *input) {
                                     text,
                                     &panel_max_x,
                                     mouse_pressed,
-                                    mouse_down);
+                                    mouse_down,
+                                    scroll,
+                                    view_top,
+                                    view_bottom);
     if (g_ui.runtime->bee.arrive_tol_world < forage_sliders[6].min_value) {
         g_ui.runtime->bee.arrive_tol_world = forage_sliders[6].min_value;
     }
@@ -980,21 +1053,33 @@ static void ui_begin_frame(const Input *input) {
         g_ui.runtime->motion_spawn_speed_std = 0.0f;
     }
 
-    ui_draw_text(text_x, cursor_y, "SPAWN MODE", text);
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "SPAWN MODE", text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("SPAWN MODE"));
     cursor_y += 20.0f;
     float button_w = (content_width - 10.0f) * 0.5f;
-    UiRect uniform_rect = {text_x, cursor_y, button_w, 28.0f};
-    UiRect gaussian_rect = {text_x + button_w + 10.0f, cursor_y, button_w, 28.0f};
+    UiRect uniform_rect = {text_x, cursor_y - scroll, button_w, 28.0f};
+    UiRect gaussian_rect = {text_x + button_w + 10.0f, cursor_y - scroll, button_w, 28.0f};
     bool uniform_active = g_ui.runtime->motion_spawn_mode == SPAWN_VELOCITY_UNIFORM_DIR;
     bool gaussian_active = g_ui.runtime->motion_spawn_mode == SPAWN_VELOCITY_GAUSSIAN_DIR;
-    ui_add_rect(uniform_rect.x, uniform_rect.y, uniform_rect.w, uniform_rect.h,
-                uniform_active ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
-    ui_add_rect(gaussian_rect.x, gaussian_rect.y, gaussian_rect.w, gaussian_rect.h,
-                gaussian_active ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    bool uniform_visible = ui_range_intersects(uniform_rect.y, uniform_rect.h, view_top, view_bottom);
+    bool gaussian_visible = ui_range_intersects(gaussian_rect.y, gaussian_rect.h, view_top, view_bottom);
+    if (uniform_visible) {
+        ui_add_rect(uniform_rect.x, uniform_rect.y, uniform_rect.w, uniform_rect.h,
+                    uniform_active ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
+    if (gaussian_visible) {
+        ui_add_rect(gaussian_rect.x, gaussian_rect.y, gaussian_rect.w, gaussian_rect.h,
+                    gaussian_active ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
     panel_max_x = fmaxf(panel_max_x, gaussian_rect.x + gaussian_rect.w);
-    ui_draw_text(uniform_rect.x + 8.0f, uniform_rect.y + 6.0f, "UNIFORM", text);
-    ui_draw_text(gaussian_rect.x + 8.0f, gaussian_rect.y + 6.0f, "GAUSSIAN", text);
+    if (uniform_visible && ui_range_intersects(uniform_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(uniform_rect.x + 8.0f, uniform_rect.y + 6.0f, "UNIFORM", text);
+    }
+    if (gaussian_visible && ui_range_intersects(gaussian_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(gaussian_rect.x + 8.0f, gaussian_rect.y + 6.0f, "GAUSSIAN", text);
+    }
     if (mouse_pressed) {
         if (ui_rect_contains(&uniform_rect, g_ui.mouse_x, g_ui.mouse_y)) {
             g_ui.runtime->motion_spawn_mode = SPAWN_VELOCITY_UNIFORM_DIR;
@@ -1004,16 +1089,28 @@ static void ui_begin_frame(const Input *input) {
     }
     cursor_y += 40.0f;
 
-    ui_draw_text(text_x, cursor_y, "BEE COUNT", text);
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "BEE COUNT", text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("BEE COUNT"));
     cursor_y += 22.0f;
-    UiRect minus_rect = {text_x, cursor_y, 28.0f, 24.0f};
-    UiRect plus_rect = {text_x + 120.0f, cursor_y, 28.0f, 24.0f};
-    ui_add_rect(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
-    ui_add_rect(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    UiRect minus_rect = {text_x, cursor_y - scroll, 28.0f, 24.0f};
+    UiRect plus_rect = {text_x + 120.0f, cursor_y - scroll, 28.0f, 24.0f};
+    bool minus_visible = ui_range_intersects(minus_rect.y, minus_rect.h, view_top, view_bottom);
+    bool plus_visible = ui_range_intersects(plus_rect.y, plus_rect.h, view_top, view_bottom);
+    if (minus_visible) {
+        ui_add_rect(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
+    if (plus_visible) {
+        ui_add_rect(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
     panel_max_x = fmaxf(panel_max_x, plus_rect.x + plus_rect.w);
-    ui_draw_text(minus_rect.x + 9.0f, minus_rect.y + 4.0f, "-", text);
-    ui_draw_text(plus_rect.x + 7.0f, plus_rect.y + 4.0f, "+", text);
+    if (minus_visible && ui_range_intersects(minus_rect.y + 4.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(minus_rect.x + 9.0f, minus_rect.y + 4.0f, "-", text);
+    }
+    if (plus_visible && ui_range_intersects(plus_rect.y + 4.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(plus_rect.x + 7.0f, plus_rect.y + 4.0f, "+", text);
+    }
 
     if (mouse_pressed && ui_rect_contains(&minus_rect, g_ui.mouse_x, g_ui.mouse_y)) {
         if (g_ui.runtime->bee_count > 1) {
@@ -1029,27 +1126,53 @@ static void ui_begin_frame(const Input *input) {
 
     char bee_buf[32];
     snprintf(bee_buf, sizeof(bee_buf), "%zu", g_ui.runtime->bee_count);
-    ui_draw_text(text_x + 40.0f, cursor_y + 4.0f, bee_buf, text);
+    float bee_text_y = cursor_y + 4.0f - scroll;
+    if (ui_range_intersects(bee_text_y, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x + 40.0f, bee_text_y, bee_buf, text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + 40.0f + ui_measure_text(bee_buf));
     cursor_y += 36.0f;
 
-    ui_draw_text(text_x, cursor_y, "WORLD SIZE", text);
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "WORLD SIZE", text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("WORLD SIZE"));
     cursor_y += 24.0f;
-    UiRect world_minus_w = {text_x, cursor_y, 28.0f, 24.0f};
-    UiRect world_plus_w = {text_x + 120.0f, cursor_y, 28.0f, 24.0f};
-    UiRect world_minus_h = {text_x, cursor_y + 32.0f, 28.0f, 24.0f};
-    UiRect world_plus_h = {text_x + 120.0f, cursor_y + 32.0f, 28.0f, 24.0f};
+    UiRect world_minus_w = {text_x, cursor_y - scroll, 28.0f, 24.0f};
+    UiRect world_plus_w = {text_x + 120.0f, cursor_y - scroll, 28.0f, 24.0f};
+    UiRect world_minus_h = {text_x, cursor_y + 32.0f - scroll, 28.0f, 24.0f};
+    UiRect world_plus_h = {text_x + 120.0f, cursor_y + 32.0f - scroll, 28.0f, 24.0f};
 
-    ui_add_rect(world_minus_w.x, world_minus_w.y, world_minus_w.w, world_minus_w.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
-    ui_add_rect(world_plus_w.x, world_plus_w.y, world_plus_w.w, world_plus_w.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
-    ui_add_rect(world_minus_h.x, world_minus_h.y, world_minus_h.w, world_minus_h.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
-    ui_add_rect(world_plus_h.x, world_plus_h.y, world_plus_h.w, world_plus_h.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    bool world_minus_w_visible = ui_range_intersects(world_minus_w.y, world_minus_w.h, view_top, view_bottom);
+    bool world_plus_w_visible = ui_range_intersects(world_plus_w.y, world_plus_w.h, view_top, view_bottom);
+    bool world_minus_h_visible = ui_range_intersects(world_minus_h.y, world_minus_h.h, view_top, view_bottom);
+    bool world_plus_h_visible = ui_range_intersects(world_plus_h.y, world_plus_h.h, view_top, view_bottom);
+
+    if (world_minus_w_visible) {
+        ui_add_rect(world_minus_w.x, world_minus_w.y, world_minus_w.w, world_minus_w.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
+    if (world_plus_w_visible) {
+        ui_add_rect(world_plus_w.x, world_plus_w.y, world_plus_w.w, world_plus_w.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
+    if (world_minus_h_visible) {
+        ui_add_rect(world_minus_h.x, world_minus_h.y, world_minus_h.w, world_minus_h.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
+    if (world_plus_h_visible) {
+        ui_add_rect(world_plus_h.x, world_plus_h.y, world_plus_h.w, world_plus_h.h, ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f));
+    }
     panel_max_x = fmaxf(panel_max_x, fmaxf(world_plus_w.x + world_plus_w.w, world_plus_h.x + world_plus_h.w));
-    ui_draw_text(world_minus_w.x + 9.0f, world_minus_w.y + 4.0f, "-", text);
-    ui_draw_text(world_plus_w.x + 7.0f, world_plus_w.y + 4.0f, "+", text);
-    ui_draw_text(world_minus_h.x + 9.0f, world_minus_h.y + 4.0f, "-", text);
-    ui_draw_text(world_plus_h.x + 7.0f, world_plus_h.y + 4.0f, "+", text);
+    if (world_minus_w_visible && ui_range_intersects(world_minus_w.y + 4.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(world_minus_w.x + 9.0f, world_minus_w.y + 4.0f, "-", text);
+    }
+    if (world_plus_w_visible && ui_range_intersects(world_plus_w.y + 4.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(world_plus_w.x + 7.0f, world_plus_w.y + 4.0f, "+", text);
+    }
+    if (world_minus_h_visible && ui_range_intersects(world_minus_h.y + 4.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(world_minus_h.x + 9.0f, world_minus_h.y + 4.0f, "-", text);
+    }
+    if (world_plus_h_visible && ui_range_intersects(world_plus_h.y + 4.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(world_plus_h.x + 7.0f, world_plus_h.y + 4.0f, "+", text);
+    }
 
     if (mouse_pressed && ui_rect_contains(&world_minus_w, g_ui.mouse_x, g_ui.mouse_y)) {
         g_ui.runtime->world_width_px = fmaxf(100.0f, g_ui.runtime->world_width_px - 100.0f);
@@ -1066,20 +1189,36 @@ static void ui_begin_frame(const Input *input) {
 
     char world_buf[48];
     snprintf(world_buf, sizeof(world_buf), "W %.0f", g_ui.runtime->world_width_px);
-    ui_draw_text(text_x + 40.0f, cursor_y + 4.0f, world_buf, text);
+    float world_w_text_y = cursor_y + 4.0f - scroll;
+    if (ui_range_intersects(world_w_text_y, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x + 40.0f, world_w_text_y, world_buf, text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + 40.0f + ui_measure_text(world_buf));
     snprintf(world_buf, sizeof(world_buf), "H %.0f", g_ui.runtime->world_height_px);
-    ui_draw_text(text_x + 40.0f, cursor_y + 36.0f, world_buf, text);
+    float world_h_text_y = cursor_y + 36.0f - scroll;
+    if (ui_range_intersects(world_h_text_y, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x + 40.0f, world_h_text_y, world_buf, text);
+    }
     panel_max_x = fmaxf(panel_max_x, text_x + 40.0f + ui_measure_text(world_buf));
     cursor_y += 72.0f;
 
-    UiRect pause_rect = {text_x, cursor_y, (content_width - 10.0f) * 0.5f, 28.0f};
-    UiRect step_rect = {text_x + pause_rect.w + 10.0f, cursor_y, pause_rect.w, 28.0f};
-    ui_add_rect(pause_rect.x, pause_rect.y, pause_rect.w, pause_rect.h, accent);
-    ui_add_rect(step_rect.x, step_rect.y, step_rect.w, step_rect.h, ui_color_rgba(0.3f, 0.3f, 0.35f, 1.0f));
+    UiRect pause_rect = {text_x, cursor_y - scroll, (content_width - 10.0f) * 0.5f, 28.0f};
+    UiRect step_rect = {text_x + pause_rect.w + 10.0f, cursor_y - scroll, pause_rect.w, 28.0f};
+    bool pause_visible = ui_range_intersects(pause_rect.y, pause_rect.h, view_top, view_bottom);
+    bool step_visible = ui_range_intersects(step_rect.y, step_rect.h, view_top, view_bottom);
+    if (pause_visible) {
+        ui_add_rect(pause_rect.x, pause_rect.y, pause_rect.w, pause_rect.h, accent);
+    }
+    if (step_visible) {
+        ui_add_rect(step_rect.x, step_rect.y, step_rect.w, step_rect.h, ui_color_rgba(0.3f, 0.3f, 0.35f, 1.0f));
+    }
     panel_max_x = fmaxf(panel_max_x, step_rect.x + step_rect.w);
-    ui_draw_text(pause_rect.x + 8.0f, pause_rect.y + 6.0f, g_ui.sim_paused ? "RESUME" : "PAUSE", text);
-    ui_draw_text(step_rect.x + 8.0f, step_rect.y + 6.0f, "STEP", text);
+    if (pause_visible && ui_range_intersects(pause_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(pause_rect.x + 8.0f, pause_rect.y + 6.0f, g_ui.sim_paused ? "RESUME" : "PAUSE", text);
+    }
+    if (step_visible && ui_range_intersects(step_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(step_rect.x + 8.0f, step_rect.y + 6.0f, "STEP", text);
+    }
     if (mouse_pressed && ui_rect_contains(&pause_rect, g_ui.mouse_x, g_ui.mouse_y)) {
         g_ui.action_toggle_pause = true;
     }
@@ -1115,13 +1254,25 @@ static void ui_begin_frame(const Input *input) {
                            fabsf(runtime->world_width_px - baseline->world_width_px) > 0.0001f ||
                            fabsf(runtime->world_height_px - baseline->world_height_px) > 0.0001f;
 
-    UiRect apply_rect = {text_x, cursor_y, content_width, 30.0f};
-    UiRect reset_rect = {text_x, cursor_y + 40.0f, content_width, 30.0f};
+    float apply_content_y = cursor_y;
+    float reset_content_y = cursor_y + 40.0f;
+    UiRect apply_rect = {text_x, apply_content_y - scroll, content_width, 30.0f};
+    UiRect reset_rect = {text_x, reset_content_y - scroll, content_width, 30.0f};
+    bool apply_visible = ui_range_intersects(apply_rect.y, apply_rect.h, view_top, view_bottom);
+    bool reset_visible = ui_range_intersects(reset_rect.y, reset_rect.h, view_top, view_bottom);
     UiColor apply_color = g_ui.dirty ? accent : ui_color_rgba(0.3f, 0.3f, 0.35f, 1.0f);
-    ui_add_rect(apply_rect.x, apply_rect.y, apply_rect.w, apply_rect.h, apply_color);
-    ui_draw_text(apply_rect.x + 8.0f, apply_rect.y + 8.0f, "APPLY", text);
-    ui_add_rect(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h, ui_color_rgba(0.25f, 0.25f, 0.30f, 1.0f));
-    ui_draw_text(reset_rect.x + 8.0f, reset_rect.y + 8.0f, "RESET", text);
+    if (apply_visible) {
+        ui_add_rect(apply_rect.x, apply_rect.y, apply_rect.w, apply_rect.h, apply_color);
+    }
+    if (reset_visible) {
+        ui_add_rect(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h, ui_color_rgba(0.25f, 0.25f, 0.30f, 1.0f));
+    }
+    if (apply_visible && ui_range_intersects(apply_rect.y + 8.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(apply_rect.x + 8.0f, apply_rect.y + 8.0f, "APPLY", text);
+    }
+    if (reset_visible && ui_range_intersects(reset_rect.y + 8.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(reset_rect.x + 8.0f, reset_rect.y + 8.0f, "RESET", text);
+    }
     panel_max_x = fmaxf(panel_max_x, reset_rect.x + reset_rect.w);
 
     if (mouse_pressed && ui_rect_contains(&apply_rect, g_ui.mouse_x, g_ui.mouse_y) && g_ui.dirty) {
@@ -1138,17 +1289,25 @@ static void ui_begin_frame(const Input *input) {
     }
 
     if (g_ui.reinit_required) {
-        ui_draw_text(text_x, reset_rect.y + 40.0f, "REINIT REQUIRED", text);
+        float notice_y = reset_content_y + 40.0f - scroll;
+        if (ui_range_intersects(notice_y, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, notice_y, "REINIT REQUIRED", text);
+        }
         panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("REINIT REQUIRED"));
     }
 
-    panel_rect.h = (reset_rect.y + 80.0f) - panel_rect.y;
+    float content_height = (reset_content_y + 80.0f) - panel_rect.y;
+    panel_rect.h = g_ui.panel_visible_height;
     panel_rect.w = fmaxf(UI_PANEL_WIDTH, (panel_max_x - panel_rect.x) + 20.0f);
     ui_update_rect(panel_bg_start, panel_rect.x, panel_rect.y, panel_rect.w, panel_rect.h);
     ui_update_rect(panel_border_start, panel_rect.x, panel_rect.y, panel_rect.w, panel_rect.h);
     g_ui.mouse_over_panel = ui_rect_contains(&panel_rect, g_ui.mouse_x, g_ui.mouse_y);
     g_ui.wants_mouse = g_ui.capturing_mouse || g_ui.mouse_over_panel;
     g_ui.wants_keyboard = true;
+    g_ui.panel_last_width = panel_rect.w;
+    g_ui.panel_content_height = content_height;
+    float max_scroll = fmaxf(0.0f, g_ui.panel_content_height - g_ui.panel_visible_height);
+    g_ui.panel_scroll = ui_clampf(g_ui.panel_scroll, 0.0f, max_scroll);
 
     ui_draw_selected_bee_panel();
 
