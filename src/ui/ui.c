@@ -88,6 +88,7 @@ typedef struct {
     bool action_apply;
     bool action_reset;
     bool action_reinit;
+    bool action_focus_queen;
 
     GLuint program;
     GLuint vao;
@@ -351,6 +352,7 @@ static float ui_measure_text(const char *text) {
 
 static const char *ui_role_name(uint8_t role) {
     switch (role) {
+        case BEE_ROLE_QUEEN: return "QUEEN";
         case BEE_ROLE_NURSE: return "NURSE";
         case BEE_ROLE_HOUSEKEEPER: return "HOUSEKEEPER";
         case BEE_ROLE_STORAGE: return "STORAGE";
@@ -884,6 +886,7 @@ static void ui_begin_frame(const Input *input) {
     g_ui.action_apply = false;
     g_ui.action_reset = false;
     g_ui.action_reinit = false;
+    g_ui.action_focus_queen = false;
     g_ui.wants_mouse = false;
     g_ui.wants_keyboard = false;
 
@@ -1227,6 +1230,21 @@ static void ui_begin_frame(const Input *input) {
     }
     cursor_y += 40.0f;
 
+    UiRect queen_rect = {text_x, cursor_y - scroll, content_width, 28.0f};
+    bool queen_visible = ui_range_intersects(queen_rect.y, queen_rect.h, view_top, view_bottom);
+    UiColor queen_button = ui_color_rgba(0.95f, 0.30f, 0.85f, 1.0f);
+    if (queen_visible) {
+        ui_add_rect(queen_rect.x, queen_rect.y, queen_rect.w, queen_rect.h, queen_button);
+    }
+    panel_max_x = fmaxf(panel_max_x, queen_rect.x + queen_rect.w);
+    if (queen_visible && ui_range_intersects(queen_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(queen_rect.x + 8.0f, queen_rect.y + 6.0f, "FIND QUEEN", text);
+    }
+    if (mouse_pressed && ui_rect_contains(&queen_rect, g_ui.mouse_x, g_ui.mouse_y)) {
+        g_ui.action_focus_queen = true;
+    }
+    cursor_y += 40.0f;
+
     bool dirty_now = false;
     const Params *runtime = g_ui.runtime;
     const Params *baseline = &g_ui.baseline;
@@ -1342,6 +1360,9 @@ UiActions ui_update(const Input *input, bool sim_paused, float dt_sec) {
     }
     if (g_ui.action_reset) {
         actions.reset = true;
+    }
+    if (g_ui.action_focus_queen) {
+        actions.focus_queen = true;
     }
 
     return actions;

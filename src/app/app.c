@@ -317,6 +317,26 @@ void app_frame(void) {
         LOG_INFO("ui: runtime params reset to baseline");
     }
 
+    if (ui_actions.focus_queen && g_sim) {
+        BeeDebugInfo queen_info;
+        if (sim_get_bee_info(g_sim, 0, &queen_info)) {
+            g_camera.center_world[0] = queen_info.pos_x;
+            g_camera.center_world[1] = queen_info.pos_y;
+            const float zoom_min = 0.05f;
+            const float zoom_max = 20.0f;
+            float focus_zoom = g_default_zoom > 0.0f ? g_default_zoom * 2.5f : 2.0f;
+            if (focus_zoom < 1.5f) {
+                focus_zoom = 1.5f;
+            }
+            if (focus_zoom > 8.0f) {
+                focus_zoom = 8.0f;
+            }
+            g_camera.zoom = clampf(focus_zoom, zoom_min, zoom_max);
+            g_selected_bee_index = 0;
+            ui_set_selected_bee(&queen_info, true);
+        }
+    }
+
     bool toggle_pause = ui_actions.toggle_pause;
     if (!ui_keyboard && input.key_space_pressed) {
         toggle_pause = true;

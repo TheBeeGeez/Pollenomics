@@ -74,6 +74,13 @@ static uint32_t bee_mode_color(uint8_t mode) {
     }
 }
 
+static uint32_t bee_color_for(uint8_t role, uint8_t mode) {
+    if (role == (uint8_t)BEE_ROLE_QUEEN) {
+        return make_color(0.95f, 0.30f, 0.85f, 1.0f);
+    }
+    return bee_mode_color(mode);
+}
+
 static float rand_angle(uint64_t *state) {
     return rand_uniform01(state) * TWO_PI - (float)M_PI;
 }
@@ -220,6 +227,11 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
         float x = base_x + jitter_x;
         float y = base_y + jitter_y;
 
+        if (i == 0 && state->hive_enabled) {
+            x = unload_x;
+            y = unload_y;
+        }
+
         float clamped_min_x = min_x_allowed;
         float clamped_max_x = max_x_allowed;
         if (clamped_min_x > clamped_max_x) {
@@ -260,12 +272,12 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
         state->capacity_uL[i] = state->bee_capacity_uL;
         state->harvest_rate_uLps[i] = state->bee_harvest_rate_uLps;
 
-        BeeRole role = bee_pick_role(age_days, &rng);
+        BeeRole role = (i == 0) ? BEE_ROLE_QUEEN : bee_pick_role(age_days, &rng);
         state->role[i] = (uint8_t)role;
 
         state->mode[i] = (uint8_t)BEE_MODE_IDLE;
         state->intent[i] = (uint8_t)BEE_INTENT_REST;
-        state->color_rgba[i] = bee_mode_color(state->mode[i]);
+        state->color_rgba[i] = bee_color_for(state->role[i], state->mode[i]);
 
         bool inside = state->hive_enabled &&
                       x >= state->hive_rect_x &&
@@ -273,6 +285,9 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
                       y >= state->hive_rect_y &&
                       y <= state->hive_rect_y + state->hive_rect_h;
         state->inside_hive_flag[i] = inside ? 1u : 0u;
+        if (i == 0 && state->hive_enabled) {
+            state->inside_hive_flag[i] = 1u;
+        }
     }
 
     state->rng_state = rng;
@@ -703,7 +718,7 @@ void sim_tick(SimState *state, float dt_sec) {
         state->load_nectar[i] = load;
         state->intent[i] = intent;
         state->mode[i] = mode;
-        state->color_rgba[i] = bee_mode_color(mode);
+        state->color_rgba[i] = bee_color_for(state->role[i], mode);
         state->target_pos_x[i] = target_x;
         state->target_pos_y[i] = target_y;
         state->target_id[i] = target_id;

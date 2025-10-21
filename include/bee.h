@@ -12,6 +12,7 @@ typedef enum BeeRole {
     BEE_ROLE_FORAGER = 3,
     BEE_ROLE_SCOUT = 4,
     BEE_ROLE_GUARD = 5,
+    BEE_ROLE_QUEEN = 6,
 } BeeRole;
 
 typedef enum BeeMode {
