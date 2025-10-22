@@ -50,6 +50,16 @@ typedef struct Params {
         int max_resolve_iters;
         float safety_margin;
     } hive;
+
+    struct {
+        float harvest_rate_uLps;
+        float capacity_uL;
+        float unload_rate_uLps;
+        float rest_recovery_per_s;
+        float speed_mps;
+        float seek_accel;
+        float arrive_tol_world;
+    } bee;
 } Params;
 
 void params_init_defaults(Params *params);

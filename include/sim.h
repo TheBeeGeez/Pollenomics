@@ -23,9 +23,10 @@ bool sim_init(SimState **out_state, const Params *params);
 void sim_tick(SimState *state, float dt_sec);
 // Advances the simulation by dt_sec seconds. No allocations occur here.
 
-RenderView sim_build_view(const SimState *state);
-// Builds a renderable view over the simulation buffers. Pointers remain valid
-// until the next call to sim_tick or sim_reset.
+RenderView sim_build_view(SimState *state);
+// Builds a renderable view over the simulation buffers. Updates cached
+// patch visualization data; pointers remain valid until the next call to
+// sim_tick or sim_reset.
 
 void sim_reset(SimState *state, uint64_t seed);
 // Reinitializes the simulation deterministically from the given seed.

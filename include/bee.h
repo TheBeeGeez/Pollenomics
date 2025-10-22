@@ -12,15 +12,16 @@ typedef enum BeeRole {
     BEE_ROLE_FORAGER = 3,
     BEE_ROLE_SCOUT = 4,
     BEE_ROLE_GUARD = 5,
+    BEE_ROLE_QUEEN = 6,
 } BeeRole;
 
 typedef enum BeeMode {
     BEE_MODE_IDLE = 0,
-    BEE_MODE_FORAGING = 1,
-    BEE_MODE_RETURNING = 2,
-    BEE_MODE_APPROACH_ENTRANCE = 3,
-    BEE_MODE_INSIDE_MOVE = 4,
-    BEE_MODE_UNLOAD_WAIT = 5,
+    BEE_MODE_OUTBOUND = 1,
+    BEE_MODE_FORAGING = 2,
+    BEE_MODE_RETURNING = 3,
+    BEE_MODE_ENTERING = 4,
+    BEE_MODE_UNLOADING = 5,
 } BeeMode;
 
 typedef enum BeeIntent {
@@ -44,6 +45,8 @@ typedef struct BeeDebugInfo {
     float state_time;
     float energy;
     float load_nectar;
+    float capacity_uL;
+    float harvest_rate_uLps;
     float target_pos_x;
     float target_pos_y;
     int32_t target_id;
@@ -53,21 +56,39 @@ typedef struct BeeDebugInfo {
     uint8_t mode;
     uint8_t intent;
     bool inside_hive;
+    float path_waypoint_x;
+    float path_waypoint_y;
+    float path_final_x;
+    float path_final_y;
+    uint8_t path_has_waypoint;
+    uint8_t path_valid;
 } BeeDebugInfo;
 
 typedef struct BeeDecisionContext {
     bool inside_hive;
+    bool arrived;
+    bool patch_valid;
     float energy;
-    float load_nectar;
+    float load_uL;
+    float capacity_uL;
+    float patch_stock;
+    float patch_capacity;
+    float patch_quality;
+    float state_time;
+    float dt_sec;
+    float hive_center_x;
+    float hive_center_y;
+    float entrance_x;
+    float entrance_y;
+    float unload_x;
+    float unload_y;
+    float forage_target_x;
+    float forage_target_y;
+    float arrive_tol;
     uint8_t role;
     uint8_t previous_mode;
     uint8_t previous_intent;
-    float hive_center_x;
-    float hive_center_y;
-    float world_width;
-    float world_height;
-    float forage_target_x;
-    float forage_target_y;
+    int32_t patch_id;
 } BeeDecisionContext;
 
 typedef struct BeeDecisionOutput {

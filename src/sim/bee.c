@@ -50,50 +50,105 @@ void bee_decide_next_action(const BeeDecisionContext *ctx, BeeDecisionOutput *ou
         return;
     }
 
+    const float capacity = ctx->capacity_uL > 0.0f ? ctx->capacity_uL : 1.0f;
+    const float load_ratio = ctx->load_uL / capacity;
+    const float load_empty_threshold = 0.05f * capacity;
+    const float load_full_threshold = 0.95f;
+    const float energy_low = 0.28f;
+    const float energy_high = 0.82f;
+    const float min_rest_time = 2.0f;
+    const float min_forage_time = 2.0f;
+    const float max_forage_time = 30.0f;
+
     uint8_t intent = ctx->previous_intent;
     uint8_t mode = ctx->previous_mode;
-    const bool inside_hive = ctx->inside_hive;
-    const float energy = ctx->energy;
-    const float load = ctx->load_nectar;
-
-    if (energy < 0.2f) {
-        intent = BEE_INTENT_REST;
-    } else if (load >= 0.8f) {
-        intent = BEE_INTENT_RETURN_HOME;
-    } else if (ctx->previous_intent == BEE_INTENT_REST && energy > 0.6f) {
-        intent = (ctx->role == BEE_ROLE_FORAGER || ctx->role == BEE_ROLE_SCOUT)
-                     ? BEE_INTENT_FIND_PATCH
-                     : BEE_INTENT_UNLOAD;
-    } else if (intent != BEE_INTENT_FIND_PATCH && intent != BEE_INTENT_EXPLORE &&
-               intent != BEE_INTENT_HARVEST && !inside_hive) {
-        intent = BEE_INTENT_FIND_PATCH;
+    int32_t target_id = ctx->patch_id;
+    if (target_id < 0) {
+        target_id = -1;
     }
-
-    if (inside_hive && load <= 0.05f &&
-        (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_UNLOAD)) {
-        intent = (energy > 0.4f) ? BEE_INTENT_FIND_PATCH : BEE_INTENT_REST;
-    }
-
-    if (inside_hive) {
-        mode = (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_UNLOAD)
-                   ? BEE_MODE_UNLOAD_WAIT
-                   : BEE_MODE_INSIDE_MOVE;
-    } else if (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_REST) {
-        mode = BEE_MODE_RETURNING;
-    } else {
-        mode = BEE_MODE_FORAGING;
-    }
-
     float target_x = ctx->forage_target_x;
     float target_y = ctx->forage_target_y;
-    int32_t target_id = -1;
+    const bool forage_capable = (ctx->role == BEE_ROLE_FORAGER || ctx->role == BEE_ROLE_SCOUT);
 
-    if (intent == BEE_INTENT_RETURN_HOME || intent == BEE_INTENT_UNLOAD || intent == BEE_INTENT_REST) {
-        target_x = ctx->hive_center_x;
-        target_y = ctx->hive_center_y;
-    } else if (intent == BEE_INTENT_FIND_PATCH || intent == BEE_INTENT_HARVEST || intent == BEE_INTENT_EXPLORE) {
-        target_x = ctx->forage_target_x;
-        target_y = ctx->forage_target_y;
+    if (!ctx->inside_hive) {
+        if (ctx->energy <= energy_low || load_ratio >= load_full_threshold) {
+            intent = BEE_INTENT_RETURN_HOME;
+        } else if (ctx->arrived && ctx->patch_id >= 0) {
+            intent = BEE_INTENT_HARVEST;
+        } else if (intent != BEE_INTENT_FIND_PATCH && intent != BEE_INTENT_HARVEST) {
+            intent = BEE_INTENT_FIND_PATCH;
+        }
+    } else {
+        if (ctx->load_uL > load_empty_threshold) {
+            intent = BEE_INTENT_UNLOAD;
+        } else {
+            if (intent == BEE_INTENT_UNLOAD) {
+                intent = BEE_INTENT_REST;
+            }
+            if (intent == BEE_INTENT_REST) {
+                if (ctx->state_time < min_rest_time || ctx->energy < energy_high || !forage_capable) {
+                    intent = BEE_INTENT_REST;
+                } else if (ctx->patch_valid) {
+                    intent = BEE_INTENT_FIND_PATCH;
+                }
+            } else if (forage_capable && ctx->energy >= energy_high && ctx->patch_valid) {
+                intent = BEE_INTENT_FIND_PATCH;
+            } else {
+                intent = BEE_INTENT_REST;
+            }
+        }
+    }
+
+    if (intent == BEE_INTENT_HARVEST) {
+        if (ctx->patch_id < 0 || ctx->patch_stock <= 1e-3f) {
+            intent = ctx->inside_hive ? BEE_INTENT_UNLOAD : BEE_INTENT_RETURN_HOME;
+        } else {
+            if (ctx->state_time < min_forage_time) {
+                intent = BEE_INTENT_HARVEST;
+            } else if (load_ratio >= load_full_threshold ||
+                       ctx->patch_stock <= 0.1f * ctx->patch_capacity ||
+                       ctx->energy <= energy_low ||
+                       ctx->state_time >= max_forage_time) {
+                intent = BEE_INTENT_RETURN_HOME;
+            }
+        }
+    }
+
+    if (intent == BEE_INTENT_RETURN_HOME && ctx->inside_hive && ctx->arrived) {
+        intent = (ctx->load_uL > load_empty_threshold) ? BEE_INTENT_UNLOAD : BEE_INTENT_REST;
+    }
+
+    switch (intent) {
+        case BEE_INTENT_FIND_PATCH:
+        case BEE_INTENT_HARVEST:
+        case BEE_INTENT_EXPLORE:
+            target_x = ctx->forage_target_x;
+            target_y = ctx->forage_target_y;
+            target_id = ctx->patch_id;
+            if (target_id < 0) {
+                target_id = -1;
+            }
+            mode = (intent == BEE_INTENT_HARVEST) ? BEE_MODE_FORAGING : BEE_MODE_OUTBOUND;
+            break;
+        case BEE_INTENT_RETURN_HOME:
+            target_x = ctx->entrance_x;
+            target_y = ctx->entrance_y;
+            target_id = -1;
+            mode = ctx->inside_hive ? BEE_MODE_ENTERING : BEE_MODE_RETURNING;
+            break;
+        case BEE_INTENT_UNLOAD:
+            target_x = ctx->unload_x;
+            target_y = ctx->unload_y;
+            target_id = -1;
+            mode = BEE_MODE_UNLOADING;
+            break;
+        case BEE_INTENT_REST:
+        default:
+            target_x = ctx->unload_x;
+            target_y = ctx->unload_y;
+            target_id = -1;
+            mode = BEE_MODE_IDLE;
+            break;
     }
 
     result.intent = intent;
@@ -103,3 +158,6 @@ void bee_decide_next_action(const BeeDecisionContext *ctx, BeeDecisionOutput *ou
     result.target_id = target_id;
     *out = result;
 }
+
+
+

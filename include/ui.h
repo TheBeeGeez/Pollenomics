@@ -14,6 +14,7 @@ typedef struct UiActions {
     bool apply;
     bool reset;
     bool reinit_required;
+    bool focus_queen;
 } UiActions;
 
 void ui_init(void);

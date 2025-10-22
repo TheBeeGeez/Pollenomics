@@ -21,6 +21,15 @@ typedef struct RenderView {
     const float *radii_px;         // Radius per element.
     const uint32_t *color_rgba;    // Packed 0xRRGGBBAA per element.
     size_t count;
+    const float *patch_positions_xy;
+    const float *patch_radii_px;
+    const uint32_t *patch_fill_rgba;
+    const float *patch_ring_radii_px;
+    const uint32_t *patch_ring_rgba;
+    size_t patch_count;
+    const float *debug_lines_xy;         // Sequence of (start,end) points, 4 floats per line.
+    const uint32_t *debug_line_rgba;     // One color per line (0xRRGGBBAA).
+    size_t debug_line_count;
 } RenderView;
 
 bool render_init(Render *out, const Params *params);

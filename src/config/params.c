@@ -62,6 +62,14 @@ void params_init_defaults(Params *params) {
     params->hive.tangent_damp = 0.9f;
     params->hive.max_resolve_iters = 2;
     params->hive.safety_margin = 0.5f;
+
+    params->bee.harvest_rate_uLps = 18.0f;
+    params->bee.capacity_uL = 45.0f;
+    params->bee.unload_rate_uLps = 160.0f;
+    params->bee.rest_recovery_per_s = 0.35f;
+    params->bee.speed_mps = 60.0f;
+    params->bee.seek_accel = 220.0f;
+    params->bee.arrive_tol_world = params->bee_radius_px * 2.0f;
 }
 
 bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
@@ -72,6 +80,53 @@ bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
 #else
             snprintf(err_buf, err_cap, "%s", "Params pointer is null");
 #endif
+        }
+        return false;
+    }
+    if (params->bee.harvest_rate_uLps <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "bee harvest_rate_uLps (%.2f) must be > 0",
+                     params->bee.harvest_rate_uLps);
+        }
+        return false;
+    }
+    if (params->bee.capacity_uL <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "bee capacity_uL (%.2f) must be > 0",
+                     params->bee.capacity_uL);
+        }
+        return false;
+    }
+    if (params->bee.unload_rate_uLps <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "bee unload_rate_uLps (%.2f) must be > 0",
+                     params->bee.unload_rate_uLps);
+        }
+        return false;
+    }
+    if (params->bee.rest_recovery_per_s <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "bee rest_recovery_per_s (%.2f) must be > 0",
+                     params->bee.rest_recovery_per_s);
+        }
+        return false;
+    }
+    if (params->bee.speed_mps <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "bee speed_mps (%.2f) must be > 0", params->bee.speed_mps);
+        }
+        return false;
+    }
+    if (params->bee.seek_accel <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "bee seek_accel (%.2f) must be > 0", params->bee.seek_accel);
+        }
+        return false;
+    }
+    if (params->bee.arrive_tol_world <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "bee arrive_tol_world (%.2f) must be > 0",
+                     params->bee.arrive_tol_world);
         }
         return false;
     }

@@ -211,6 +211,7 @@ bool app_init(const Params *params) {
         plat_shutdown(&g_platform);
         return false;
     }
+    LOG_INFO("app_init: sim ready");
 
     int init_fb_w = g_params.window_width_px;
     int init_fb_h = g_params.window_height_px;
@@ -314,6 +315,26 @@ void app_frame(void) {
     }
     if (ui_actions.reset) {
         LOG_INFO("ui: runtime params reset to baseline");
+    }
+
+    if (ui_actions.focus_queen && g_sim) {
+        BeeDebugInfo queen_info;
+        if (sim_get_bee_info(g_sim, 0, &queen_info)) {
+            g_camera.center_world[0] = queen_info.pos_x;
+            g_camera.center_world[1] = queen_info.pos_y;
+            const float zoom_min = 0.05f;
+            const float zoom_max = 20.0f;
+            float focus_zoom = g_default_zoom > 0.0f ? g_default_zoom * 2.5f : 2.0f;
+            if (focus_zoom < 1.5f) {
+                focus_zoom = 1.5f;
+            }
+            if (focus_zoom > 8.0f) {
+                focus_zoom = 8.0f;
+            }
+            g_camera.zoom = clampf(focus_zoom, zoom_min, zoom_max);
+            g_selected_bee_index = 0;
+            ui_set_selected_bee(&queen_info, true);
+        }
     }
 
     bool toggle_pause = ui_actions.toggle_pause;
@@ -451,6 +472,10 @@ void app_frame(void) {
         app_recompute_world_defaults();
     }
 
+    float debug_line_points[8] = {0};
+    uint32_t debug_line_colors[2] = {0};
+    size_t debug_line_count = 0;
+
     RenderView view = (RenderView){0};
     if (g_sim) {
         view = sim_build_view(g_sim);
@@ -458,6 +483,27 @@ void app_frame(void) {
             BeeDebugInfo info;
             if (sim_get_bee_info(g_sim, g_selected_bee_index, &info)) {
                 ui_set_selected_bee(&info, true);
+                if (info.path_valid) {
+                    const uint32_t debug_color = 0xFF0000FFu;
+                    const float eps = 1e-3f;
+                    bool distinct_waypoint = info.path_has_waypoint &&
+                                             (fabsf(info.path_waypoint_x - info.path_final_x) > eps ||
+                                              fabsf(info.path_waypoint_y - info.path_final_y) > eps);
+                    debug_line_points[0] = info.pos_x;
+                    debug_line_points[1] = info.pos_y;
+                    debug_line_points[2] = distinct_waypoint ? info.path_waypoint_x : info.path_final_x;
+                    debug_line_points[3] = distinct_waypoint ? info.path_waypoint_y : info.path_final_y;
+                    debug_line_colors[0] = debug_color;
+                    debug_line_count = 1;
+                    if (distinct_waypoint) {
+                        debug_line_points[4] = info.path_waypoint_x;
+                        debug_line_points[5] = info.path_waypoint_y;
+                        debug_line_points[6] = info.path_final_x;
+                        debug_line_points[7] = info.path_final_y;
+                        debug_line_colors[1] = debug_color;
+                        debug_line_count = 2;
+                    }
+                }
             } else {
                 g_selected_bee_index = SIZE_MAX;
                 ui_set_selected_bee(NULL, false);
@@ -466,6 +512,11 @@ void app_frame(void) {
     } else if (g_selected_bee_index != SIZE_MAX) {
         g_selected_bee_index = SIZE_MAX;
         ui_set_selected_bee(NULL, false);
+    }
+    if (debug_line_count > 0) {
+        view.debug_lines_xy = debug_line_points;
+        view.debug_line_rgba = debug_line_colors;
+        view.debug_line_count = debug_line_count;
     }
     render_set_camera(&g_render, &g_camera);
     render_frame(&g_render, &view);
