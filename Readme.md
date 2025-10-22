@@ -208,13 +208,9 @@ Include `SDL2.dll` next to the exe and ensure the **MSVC redistributable** (VS 2
 
 ## License
 
-TBD (add your preferred license here).
-
 ---
 
 ### Credits
 
 * SDL2 (windowing/input), glad (OpenGL loader)
 * Inspiration from honeybee behavior literature (foraging, recruitment, hygienic behavior) to ground future features
-
-If anything in the setup doesn’t work on your machine, paste the exact command and console output—you’ll get a tailored fix quickly.
