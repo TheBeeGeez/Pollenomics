@@ -42,6 +42,10 @@ static size_t ui_add_rect(float x, float y, float w, float h, UiColor color);
 static float ui_measure_text(const char *text);
 static void ui_draw_text(float x, float y, const char *text, UiColor color);
 static void ui_world_to_screen(float wx, float wy, float *sx, float *sy);
+static void ui_reserve_vertices(size_t additional);
+static void ui_push_vertex(float x, float y, UiColor color);
+static void ui_update_rect(size_t start, float x, float y, float w, float h);
+static void ui_draw_hive_tile_hex(float cx, float cy, float cell_radius, UiColor color);
 
 static float ui_clampf(float v, float lo, float hi) {
     if (v < lo) {
@@ -122,41 +126,6 @@ static int ui_hex_distance_axial(int q1, int r1, int q2, int r2) {
 static const int UI_HIVE_DIR_Q[6] = {0, 1, 1, 0, -1, -1};
 static const int UI_HIVE_DIR_R[6] = {-1, -1, 0, 1, 1, 0};
 
-static void ui_draw_hive_tile_hex(float cx, float cy, float cell_radius, UiColor color) {
-    static const float OFFSETS[6][2] = {
-        {0.8660254f, 0.5f},
-        {0.0f, 1.0f},
-        {-0.8660254f, 0.5f},
-        {-0.8660254f, -0.5f},
-        {0.0f, -1.0f},
-        {0.8660254f, -0.5f},
-    };
-
-    float center_sx = 0.0f;
-    float center_sy = 0.0f;
-    ui_world_to_screen(cx, cy, &center_sx, &center_sy);
-
-    float corner_sx[6];
-    float corner_sy[6];
-    for (int i = 0; i < 6; ++i) {
-        float wx = cx + cell_radius * OFFSETS[i][0];
-        float wy = cy + cell_radius * OFFSETS[i][1];
-        ui_world_to_screen(wx, wy, &corner_sx[i], &corner_sy[i]);
-    }
-
-    ui_reserve_vertices(18);
-    if (!g_ui.vertices) {
-        return;
-    }
-
-    for (int i = 0; i < 6; ++i) {
-        int next = (i + 1) % 6;
-        ui_push_vertex(center_sx, center_sy, color);
-        ui_push_vertex(corner_sx[i], corner_sy[i], color);
-        ui_push_vertex(corner_sx[next], corner_sy[next], color);
-    }
-}
-
 typedef struct UiHiveWallCandidate {
     float cx;
     float cy;
@@ -179,11 +148,6 @@ typedef struct {
     float x, y;
     float r, g, b, a;
 } UiVertex;
-
-typedef struct {
-    char ch;
-    unsigned char rows[7];
-} UiGlyph;
 
 typedef struct {
     bool panel_open;
@@ -244,6 +208,46 @@ typedef struct {
 
 static UiState g_ui;
 
+static void ui_draw_hive_tile_hex(float cx, float cy, float cell_radius, UiColor color) {
+    static const float OFFSETS[6][2] = {
+        {0.8660254f, 0.5f},
+        {0.0f, 1.0f},
+        {-0.8660254f, 0.5f},
+        {-0.8660254f, -0.5f},
+        {0.0f, -1.0f},
+        {0.8660254f, -0.5f},
+    };
+
+    float center_sx = 0.0f;
+    float center_sy = 0.0f;
+    ui_world_to_screen(cx, cy, &center_sx, &center_sy);
+
+    float corner_sx[6];
+    float corner_sy[6];
+    for (int i = 0; i < 6; ++i) {
+        float wx = cx + cell_radius * OFFSETS[i][0];
+        float wy = cy + cell_radius * OFFSETS[i][1];
+        ui_world_to_screen(wx, wy, &corner_sx[i], &corner_sy[i]);
+    }
+
+    ui_reserve_vertices(18);
+    if (!g_ui.vertices) {
+        return;
+    }
+
+    for (int i = 0; i < 6; ++i) {
+        int next = (i + 1) % 6;
+        ui_push_vertex(center_sx, center_sy, color);
+        ui_push_vertex(corner_sx[i], corner_sy[i], color);
+        ui_push_vertex(corner_sx[next], corner_sy[next], color);
+    }
+}
+
+typedef struct {
+    char ch;
+    unsigned char rows[7];
+} UiGlyph;
+
 static const char *const UI_VERTEX_SHADER =
     "#version 330 core\n"
     "layout(location = 0) in vec2 a_pos;\n"
@@ -267,6 +271,21 @@ static const char *const UI_FRAGMENT_SHADER =
 static UiColor ui_color_rgba(float r, float g, float b, float a) {
     UiColor c = {r, g, b, a};
     return c;
+}
+
+static void ui_copy_text(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (!src) {
+        src = "";
+    }
+#if defined(_MSC_VER)
+    strncpy_s(dst, dst_size, src, _TRUNCATE);
+#else
+    strncpy(dst, src, dst_size - 1);
+    dst[dst_size - 1] = '\0';
+#endif
 }
 
 static bool ui_range_intersects(float y, float h, float top, float bottom);
@@ -833,8 +852,7 @@ static void ui_draw_selected_bee_panel(void) {
     #define ADD_LINE(TEXT_EXPR, COLOR_EXPR, SPACING_VALUE)                                \
         do {                                                                              \
             if (line_count < sizeof(lines) / sizeof(lines[0])) {                          \
-                strncpy(lines[line_count].text, (TEXT_EXPR), sizeof(lines[line_count].text) - 1); \
-                lines[line_count].text[sizeof(lines[line_count].text) - 1] = '\0';        \
+                ui_copy_text(lines[line_count].text, sizeof(lines[line_count].text), (TEXT_EXPR)); \
                 lines[line_count].color = (COLOR_EXPR);                                   \
                 lines[line_count].spacing_after = (SPACING_VALUE);                        \
                 ++line_count;                                                             \
@@ -950,8 +968,7 @@ static void ui_draw_selected_hex_panel(void) {
 #define HEX_ADD_LINE(TEXT_EXPR, COLOR_EXPR, SPACING_VALUE)                                \
     do {                                                                                \
         if (line_count < sizeof(lines) / sizeof(lines[0])) {                            \
-            strncpy(lines[line_count].text, (TEXT_EXPR), sizeof(lines[line_count].text) - 1); \
-            lines[line_count].text[sizeof(lines[line_count].text) - 1] = '\0';          \
+            ui_copy_text(lines[line_count].text, sizeof(lines[line_count].text), (TEXT_EXPR)); \
             lines[line_count].color = (COLOR_EXPR);                                     \
             lines[line_count].spacing_after = (SPACING_VALUE);                          \
             ++line_count;                                                               \
