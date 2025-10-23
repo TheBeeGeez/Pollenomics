@@ -1,9 +1,13 @@
 #include "app.h"
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include "hex.h"
 #include "params.h"
 #include "platform.h"
 #include "render.h"
+#include "render_hex.h"
 #include "sim.h"
 #include "ui.h"
 
@@ -24,6 +28,9 @@ static int g_fb_height = 0;
 static float g_sim_fixed_dt = 1.0f / 120.0f;
 static const double g_sim_max_accumulator = 0.25;
 static size_t g_selected_bee_index = SIZE_MAX;
+static HexWorld g_hex_world = {0};
+static RenderHexSettings g_hex_settings = {0};
+static size_t g_selected_hex_index = (size_t)-1;
 static float clampf(float v, float lo, float hi) {
     if (v < lo) {
         return lo;
@@ -42,6 +49,9 @@ static void app_reset_camera(void) {
 
 static void app_recompute_world_defaults(void);
 static bool app_apply_runtime_params(bool reinit_required);
+static void app_init_hex_settings(void);
+static void app_sync_hex_settings(void);
+static void app_set_hex_selection(size_t index);
 
 static void app_update_camera(const Input *input, float dt_sec) {
     if (!input || g_fb_width <= 0 || g_fb_height <= 0) {
@@ -133,6 +143,66 @@ static void app_recompute_world_defaults(void) {
     }
 }
 
+static void app_init_hex_palette(RenderHexPalette *palette) {
+    if (!palette) {
+        return;
+    }
+    static const float kColors[HEX_TERRAIN_COUNT][4] = {
+        {0.80f, 0.82f, 0.85f, 0.65f},  // OPEN
+        {0.25f, 0.56f, 0.32f, 0.80f},  // FOREST
+        {0.50f, 0.40f, 0.32f, 0.80f},  // MOUNTAIN
+        {0.22f, 0.45f, 0.85f, 0.75f},  // WATER
+        {0.90f, 0.74f, 0.24f, 0.90f},  // HIVE
+        {0.94f, 0.54f, 0.74f, 0.85f},  // FLOWERS
+        {0.35f, 0.90f, 0.95f, 0.85f},  // ENTRANCE
+    };
+    for (int i = 0; i < HEX_TERRAIN_COUNT; ++i) {
+        memcpy(palette->terrain_rgba[i], kColors[i], sizeof(kColors[i]));
+    }
+    palette->selected_multiplier = 1.3f;
+    palette->selected_alpha = 1.0f;
+    palette->outline_rgba[0] = 1.0f;
+    palette->outline_rgba[1] = 1.0f;
+    palette->outline_rgba[2] = 1.0f;
+    palette->outline_rgba[3] = 1.0f;
+    palette->outline_width_px = 3.0f;
+}
+
+static void app_init_hex_settings(void) {
+    memset(&g_hex_settings, 0, sizeof(g_hex_settings));
+    g_hex_settings.enabled = g_params.hex.enabled;
+    g_hex_settings.draw_on_top = g_params.hex.draw_on_top;
+    g_hex_settings.selected_index = -1;
+    app_init_hex_palette(&g_hex_settings.palette);
+}
+
+static void app_sync_hex_settings(void) {
+    g_params_runtime.hex.enabled = g_hex_settings.enabled;
+    g_params_runtime.hex.draw_on_top = g_hex_settings.draw_on_top;
+    render_set_hex_settings(&g_render, &g_hex_settings);
+    ui_set_hex_options(g_hex_settings.enabled, g_hex_settings.draw_on_top);
+}
+
+static void app_set_hex_selection(size_t index) {
+    size_t tile_count = hex_world_tile_count(&g_hex_world);
+    if (!g_hex_world.tiles || index == (size_t)-1 || index >= tile_count) {
+        g_selected_hex_index = (size_t)-1;
+        g_hex_settings.selected_index = -1;
+        ui_set_hex_selection(NULL, false);
+        render_set_hex_settings(&g_render, &g_hex_settings);
+        return;
+    }
+
+    g_selected_hex_index = index;
+    if (index > (size_t)INT32_MAX) {
+        g_hex_settings.selected_index = INT32_MAX;
+    } else {
+        g_hex_settings.selected_index = (int)index;
+    }
+    ui_set_hex_selection(&g_hex_world.tiles[index], true);
+    render_set_hex_settings(&g_render, &g_hex_settings);
+}
+
 static double g_sim_accumulator_sec = 0.0;
 static bool g_sim_paused = false;
 static double g_log_accumulator_sec = 0.0;
@@ -201,8 +271,21 @@ bool app_init(const Params *params) {
         return false;
     }
 
+    app_init_hex_settings();
+    if (!hex_world_init(&g_hex_world, &g_params)) {
+        LOG_ERROR("Hex world initialization failed; disabling hex grid");
+        g_hex_settings.enabled = false;
+    }
+    if (!g_hex_world.tiles) {
+        g_hex_settings.enabled = false;
+    }
+    render_set_hex_world(&g_render, g_hex_world.tiles ? &g_hex_world : NULL);
+    render_set_hex_settings(&g_render, &g_hex_settings);
+
     ui_init();
     ui_sync_to_params(&g_params, &g_params_runtime);
+    app_sync_hex_settings();
+    app_set_hex_selection((size_t)-1);
 
     if (!sim_init(&g_sim, &g_params)) {
         LOG_ERROR("Simulation initialization failed");
@@ -257,6 +340,7 @@ static bool app_apply_runtime_params(bool reinit_required) {
     bool world_changed =
         fabsf(new_params.world_width_px - g_params.world_width_px) > 0.0001f ||
         fabsf(new_params.world_height_px - g_params.world_height_px) > 0.0001f;
+    bool hex_changed = memcmp(&new_params.hex, &g_params.hex, sizeof(g_params.hex)) != 0;
 
     if (reinit_required) {
         SimState *fresh = NULL;
@@ -284,6 +368,24 @@ static bool app_apply_runtime_params(bool reinit_required) {
         app_recompute_world_defaults();
         app_reset_camera();
     }
+
+    if (hex_changed) {
+        app_init_hex_settings();
+        hex_world_shutdown(&g_hex_world);
+        if (!hex_world_init(&g_hex_world, &g_params)) {
+            LOG_ERROR("hex world reinit failed; grid disabled");
+            g_hex_settings.enabled = false;
+        }
+        if (!g_hex_world.tiles) {
+            g_hex_settings.enabled = false;
+        }
+        render_set_hex_world(&g_render, g_hex_world.tiles ? &g_hex_world : NULL);
+        app_set_hex_selection((size_t)-1);
+    } else {
+        g_hex_settings.enabled = g_params.hex.enabled;
+        g_hex_settings.draw_on_top = g_params.hex.draw_on_top;
+    }
+    app_sync_hex_settings();
 
     g_params_runtime = g_params;
     ui_sync_to_params(&g_params, &g_params_runtime);
@@ -315,6 +417,25 @@ void app_frame(void) {
     }
     if (ui_actions.reset) {
         LOG_INFO("ui: runtime params reset to baseline");
+    }
+
+    bool hex_settings_changed = false;
+    if (ui_actions.hex_show_grid_changed) {
+        g_hex_settings.enabled = ui_actions.hex_show_grid_enabled;
+        hex_settings_changed = true;
+        if (!g_hex_settings.enabled) {
+            app_set_hex_selection((size_t)-1);
+        }
+    }
+    if (ui_actions.hex_draw_on_top_changed) {
+        g_hex_settings.draw_on_top = ui_actions.hex_draw_on_top;
+        hex_settings_changed = true;
+    }
+    if (hex_settings_changed) {
+        app_sync_hex_settings();
+    }
+    if (ui_actions.hex_clear_selection) {
+        app_set_hex_selection((size_t)-1);
     }
 
     if (ui_actions.focus_queen && g_sim) {
@@ -361,6 +482,16 @@ void app_frame(void) {
         float half_h = 0.5f * (float)g_fb_height;
         float world_x = (input.mouse_x_px - half_w) / zoom + g_camera.center_world[0];
         float world_y = (input.mouse_y_px - half_h) / zoom + g_camera.center_world[1];
+
+        if (g_hex_settings.enabled && g_hex_world.tiles) {
+            size_t tile_index = (size_t)-1;
+            if (hex_world_pick(&g_hex_world, world_x, world_y, NULL, NULL, &tile_index)) {
+                app_set_hex_selection(tile_index);
+            } else {
+                app_set_hex_selection((size_t)-1);
+            }
+        }
+
         float pick_radius_px = 18.0f;
         float pick_radius_world = pick_radius_px / zoom;
         if (g_sim) {
@@ -532,6 +663,7 @@ void app_shutdown(void) {
     sim_shutdown(g_sim);
     g_sim = NULL;
     ui_shutdown();
+    hex_world_shutdown(&g_hex_world);
     render_shutdown(&g_render);
     plat_shutdown(&g_platform);
     log_shutdown();

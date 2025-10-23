@@ -89,6 +89,9 @@ typedef struct {
     bool action_reset;
     bool action_reinit;
     bool action_focus_queen;
+    bool action_hex_show_grid_changed;
+    bool action_hex_draw_on_top_changed;
+    bool action_hex_clear_selection;
 
     GLuint program;
     GLuint vao;
@@ -109,6 +112,10 @@ typedef struct {
     float panel_content_height;
     float panel_visible_height;
     float panel_last_width;
+    bool hex_show_grid;
+    bool hex_draw_on_top;
+    bool hex_selection_valid;
+    HexTile hex_selected_tile;
 } UiState;
 
 static UiState g_ui;
@@ -525,6 +532,27 @@ static void ui_draw_hive_overlay(void) {
     }
 }
 
+static const char *ui_hex_terrain_name(uint8_t terrain) {
+    switch (terrain) {
+        case HEX_TERRAIN_OPEN:
+            return "OPEN";
+        case HEX_TERRAIN_FOREST:
+            return "FOREST";
+        case HEX_TERRAIN_MOUNTAIN:
+            return "MOUNTAIN";
+        case HEX_TERRAIN_WATER:
+            return "WATER";
+        case HEX_TERRAIN_HIVE:
+            return "HIVE";
+        case HEX_TERRAIN_FLOWERS:
+            return "FLOWERS";
+        case HEX_TERRAIN_ENTRANCE:
+            return "ENTRANCE";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 void ui_set_viewport(const RenderCamera *camera, int framebuffer_width, int framebuffer_height) {
     g_ui.fb_width = framebuffer_width;
     g_ui.fb_height = framebuffer_height;
@@ -550,6 +578,20 @@ void ui_set_selected_bee(const BeeDebugInfo *info, bool valid) {
     } else {
         g_ui.selected_valid = false;
         g_ui.selected_panel_open = false;
+    }
+}
+
+void ui_set_hex_options(bool enabled, bool draw_on_top) {
+    g_ui.hex_show_grid = enabled;
+    g_ui.hex_draw_on_top = draw_on_top;
+}
+
+void ui_set_hex_selection(const HexTile *tile, bool valid) {
+    if (valid && tile) {
+        g_ui.hex_selected_tile = *tile;
+        g_ui.hex_selection_valid = true;
+    } else {
+        g_ui.hex_selection_valid = false;
     }
 }
 #define GLYPH(ch, r0, r1, r2, r3, r4, r5, r6) \
@@ -827,6 +869,9 @@ void ui_init(void) {
     g_ui.panel_content_height = 0.0f;
     g_ui.panel_visible_height = 0.0f;
     g_ui.panel_last_width = UI_PANEL_WIDTH;
+    g_ui.hex_show_grid = true;
+    g_ui.hex_draw_on_top = true;
+    g_ui.hex_selection_valid = false;
 
     glGenVertexArrays(1, &g_ui.vao);
     glGenBuffers(1, &g_ui.vbo);
@@ -887,6 +932,9 @@ static void ui_begin_frame(const Input *input) {
     g_ui.action_reset = false;
     g_ui.action_reinit = false;
     g_ui.action_focus_queen = false;
+    g_ui.action_hex_show_grid_changed = false;
+    g_ui.action_hex_draw_on_top_changed = false;
+    g_ui.action_hex_clear_selection = false;
     g_ui.wants_mouse = false;
     g_ui.wants_keyboard = false;
 
@@ -969,6 +1017,139 @@ static void ui_begin_frame(const Input *input) {
     size_t panel_border_start = ui_add_rect(panel_rect.x, panel_rect.y, UI_PANEL_WIDTH, view_height, border);
 
     float text_x = panel_rect.x + 20.0f;
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "HEX GRID", text);
+    }
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("HEX GRID"));
+    cursor_y += 24.0f;
+
+    UiRect show_rect = {text_x, cursor_y - scroll, content_width, 28.0f};
+    bool show_visible = ui_range_intersects(show_rect.y, show_rect.h, view_top, view_bottom);
+    UiColor show_color = g_ui.hex_show_grid ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f);
+    if (show_visible) {
+        ui_add_rect(show_rect.x, show_rect.y, show_rect.w, show_rect.h, show_color);
+        if (ui_range_intersects(show_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(show_rect.x + 8.0f, show_rect.y + 6.0f, "SHOW HEX GRID", text);
+        }
+    }
+    if (mouse_pressed && ui_rect_contains(&show_rect, g_ui.mouse_x, g_ui.mouse_y)) {
+        g_ui.hex_show_grid = !g_ui.hex_show_grid;
+        g_ui.action_hex_show_grid_changed = true;
+    }
+    panel_max_x = fmaxf(panel_max_x, show_rect.x + show_rect.w);
+    cursor_y += 34.0f;
+
+    UiRect draw_rect = {text_x, cursor_y - scroll, content_width, 28.0f};
+    bool draw_visible = ui_range_intersects(draw_rect.y, draw_rect.h, view_top, view_bottom);
+    UiColor draw_color = g_ui.hex_draw_on_top ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f);
+    if (draw_visible) {
+        ui_add_rect(draw_rect.x, draw_rect.y, draw_rect.w, draw_rect.h, draw_color);
+        if (ui_range_intersects(draw_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(draw_rect.x + 8.0f, draw_rect.y + 6.0f, "DRAW HEXES ON TOP", text);
+        }
+    }
+    if (mouse_pressed && ui_rect_contains(&draw_rect, g_ui.mouse_x, g_ui.mouse_y)) {
+        g_ui.hex_draw_on_top = !g_ui.hex_draw_on_top;
+        g_ui.action_hex_draw_on_top_changed = true;
+    }
+    panel_max_x = fmaxf(panel_max_x, draw_rect.x + draw_rect.w);
+    cursor_y += 34.0f;
+
+    UiRect clear_rect = {text_x, cursor_y - scroll, content_width, 24.0f};
+    bool clear_visible = ui_range_intersects(clear_rect.y, clear_rect.h, view_top, view_bottom);
+    UiColor clear_color = g_ui.hex_selection_valid ? ui_color_rgba(0.45f, 0.20f, 0.55f, 1.0f)
+                                                   : ui_color_rgba(0.25f, 0.25f, 0.30f, 1.0f);
+    if (clear_visible) {
+        ui_add_rect(clear_rect.x, clear_rect.y, clear_rect.w, clear_rect.h, clear_color);
+        if (ui_range_intersects(clear_rect.y + 4.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(clear_rect.x + 8.0f, clear_rect.y + 4.0f, "CLEAR HEX SELECTION", text);
+        }
+    }
+    if (mouse_pressed && ui_rect_contains(&clear_rect, g_ui.mouse_x, g_ui.mouse_y)) {
+        g_ui.action_hex_clear_selection = true;
+        g_ui.hex_selection_valid = false;
+    }
+    panel_max_x = fmaxf(panel_max_x, clear_rect.x + clear_rect.w);
+    cursor_y += 32.0f;
+
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "SELECTED TILE", text);
+    }
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("SELECTED TILE"));
+    cursor_y += 22.0f;
+
+    if (!g_ui.hex_selection_valid) {
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, "NONE", text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("NONE"));
+        cursor_y += 24.0f;
+    } else {
+        char line_buf[128];
+        snprintf(line_buf, sizeof(line_buf), "Q %d", g_ui.hex_selected_tile.q);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "R %d", g_ui.hex_selected_tile.r);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "CENTER X %.2f", g_ui.hex_selected_tile.center_x);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "CENTER Y %.2f", g_ui.hex_selected_tile.center_y);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "TERRAIN %s", ui_hex_terrain_name(g_ui.hex_selected_tile.terrain));
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "NECTAR STOCK %.2f", g_ui.hex_selected_tile.nectar_stock);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "NECTAR CAPACITY %.2f", g_ui.hex_selected_tile.nectar_capacity);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "NECTAR RECHARGE %.2f", g_ui.hex_selected_tile.nectar_recharge_rate);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 20.0f;
+
+        snprintf(line_buf, sizeof(line_buf), "FLOW CAPACITY %.2f", g_ui.hex_selected_tile.flow_capacity);
+        if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+            ui_draw_text(text_x, cursor_y - scroll, line_buf, text);
+        }
+        panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text(line_buf));
+        cursor_y += 24.0f;
+    }
+
     if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
         ui_draw_text(text_x, cursor_y - scroll, "SIM CONTROLS", text);
     }
@@ -1363,6 +1544,17 @@ UiActions ui_update(const Input *input, bool sim_paused, float dt_sec) {
     }
     if (g_ui.action_focus_queen) {
         actions.focus_queen = true;
+    }
+    if (g_ui.action_hex_show_grid_changed) {
+        actions.hex_show_grid_changed = true;
+        actions.hex_show_grid_enabled = g_ui.hex_show_grid;
+    }
+    if (g_ui.action_hex_draw_on_top_changed) {
+        actions.hex_draw_on_top_changed = true;
+        actions.hex_draw_on_top = g_ui.hex_draw_on_top;
+    }
+    if (g_ui.action_hex_clear_selection) {
+        actions.hex_clear_selection = true;
     }
 
     return actions;

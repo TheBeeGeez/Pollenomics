@@ -60,6 +60,16 @@ typedef struct Params {
         float seek_accel;
         float arrive_tol_world;
     } bee;
+
+    struct {
+        float cell_size;
+        int q_min;
+        int q_max;
+        int r_min;
+        int r_max;
+        bool draw_on_top;
+        bool enabled;
+    } hex;
 } Params;
 
 void params_init_defaults(Params *params);

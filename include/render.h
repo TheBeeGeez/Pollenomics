@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 #include "params.h"
+#include "hex.h"
+#include "render_hex.h"
 
 typedef struct Render {
     void *state;
@@ -47,6 +49,12 @@ void render_set_clear_color(Render *render, const float rgba[4]);
 void render_frame(Render *render, const RenderView *view);
 // Issues draw commands for the current frame using the provided view; must not
 // swap buffers.
+
+void render_set_hex_world(Render *render, const HexWorld *world);
+// Provides the hex world reference used for hex rendering; may be NULL.
+
+void render_set_hex_settings(Render *render, const RenderHexSettings *settings);
+// Configures hex rendering behavior, colors, and selection.
 
 void render_shutdown(Render *render);
 // Releases GPU resources; safe to call once after render_init succeeds.

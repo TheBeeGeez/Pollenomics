@@ -17,8 +17,10 @@ add_executable(bee_sim
   src/sim/sim.c
   src/platform/sdl_io.c
   src/render/gl_backend.c
+  src/render/hex_draw.c
   src/ui/ui.c
   src/util/log.c
+  src/world/hex_world.c
 )
 
 target_include_directories(bee_sim PRIVATE include)

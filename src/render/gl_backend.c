@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "params.h"
+#include "hex_draw.h"
 #include "util/log.h"
 
 typedef struct InstanceAttrib {
@@ -53,6 +54,11 @@ typedef struct RenderState {
     size_t line_capacity;
     size_t line_buffer_size;
     float *line_cpu_buffer;
+    HexDrawState hex_draw;
+    const HexWorld *hex_world;
+    RenderHexSettings hex_settings;
+    bool hex_settings_valid;
+    bool hex_dirty;
 } RenderState;
 
 static void destroy_render_state(RenderState *state) {
@@ -80,6 +86,7 @@ static void destroy_render_state(RenderState *state) {
     if (state->line_vbo) {
         glDeleteBuffers(1, &state->line_vbo);
     }
+    hex_draw_shutdown(&state->hex_draw);
     free(state->instance_cpu_buffer);
     free(state->line_cpu_buffer);
     free(state);
@@ -407,6 +414,11 @@ bool render_init(Render *render, const Params *params) {
     state->line_capacity = 0;
     state->line_buffer_size = 0;
     state->line_cpu_buffer = NULL;
+    state->hex_world = NULL;
+    state->hex_settings_valid = false;
+    state->hex_dirty = true;
+    memset(&state->hex_settings, 0, sizeof(state->hex_settings));
+    state->hex_settings.selected_index = -1;
 
     static const float quad_vertices[] = {
         0.0f, 0.0f,
@@ -439,6 +451,12 @@ bool render_init(Render *render, const Params *params) {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     configure_line_attribs(state);
+
+    if (!hex_draw_init(&state->hex_draw)) {
+        LOG_ERROR("render: failed to initialize hex renderer");
+        destroy_render_state(state);
+        return false;
+    }
 
     char log_buffer[2048];
     GLuint vs = compile_shader(GL_VERTEX_SHADER, kVertexShaderSrc, log_buffer, sizeof(log_buffer));
@@ -584,6 +602,19 @@ void render_frame(Render *render, const RenderView *view) {
                  state->clear_color[3]);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    bool hex_ready = false;
+    if (state->hex_settings_valid && state->hex_settings.enabled && state->hex_world) {
+        if (state->hex_dirty) {
+            if (!hex_draw_update(&state->hex_draw, state->hex_world, &state->hex_settings)) {
+                LOG_ERROR("render: hex_draw_update failed; disabling hex layer");
+                state->hex_settings_valid = false;
+                state->hex_draw.enabled = false;
+            }
+            state->hex_dirty = false;
+        }
+        hex_ready = state->hex_draw.enabled;
+    }
+
     size_t bee_count = view ? view->count : 0;
     size_t patch_count = view ? view->patch_count : 0;
     const bool patch_data_valid = view && view->patch_positions_xy && view->patch_radii_px && view->patch_fill_rgba && view->patch_ring_radii_px && view->patch_ring_rgba;
@@ -591,8 +622,24 @@ void render_frame(Render *render, const RenderView *view) {
         patch_count = 0;
     }
     size_t total_instances = bee_count + (patch_count * 2);
-    if (!state->program || total_instances == 0) {
+    if (!state->program) {
         return;
+    }
+
+    float cam_zoom = state->cam_zoom;
+    if (cam_zoom <= 0.0f) {
+        cam_zoom = 1.0f;
+    }
+    float cam_center_x = state->cam_center[0];
+    float cam_center_y = state->cam_center[1];
+
+    if (hex_ready && !state->hex_settings.draw_on_top) {
+        hex_draw_draw(&state->hex_draw,
+                      &state->hex_settings,
+                      state->cam_center,
+                      cam_zoom,
+                      state->fb_width,
+                      state->fb_height);
     }
 
     if (!ensure_instance_capacity(state, total_instances)) {
@@ -619,27 +666,22 @@ void render_frame(Render *render, const RenderView *view) {
     pack_instance_batch(state, offset, view ? view->positions_xy : NULL, view ? view->radii_px : NULL,
                         view ? view->color_rgba : NULL, bee_count);
 
-    float cam_zoom = state->cam_zoom;
-    if (cam_zoom <= 0.0f) {
-        cam_zoom = 1.0f;
+    if (total_instances > 0) {
+        size_t byte_count = total_instances * (size_t)INSTANCE_STRIDE;
+        glBindBuffer(GL_ARRAY_BUFFER, state->instance_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)state->instance_buffer_size, NULL, GL_STREAM_DRAW);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)byte_count, state->instance_cpu_buffer);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        glUseProgram(state->program);
+        glUniform2f(state->u_screen, (float)state->fb_width, (float)state->fb_height);
+        glUniform2f(state->u_cam_center, cam_center_x, cam_center_y);
+        glUniform1f(state->u_cam_zoom, cam_zoom);
+        glBindVertexArray(state->vao);
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)total_instances);
+        glBindVertexArray(0);
+        glUseProgram(0);
     }
-    float cam_center_x = state->cam_center[0];
-    float cam_center_y = state->cam_center[1];
-
-    size_t byte_count = total_instances * (size_t)INSTANCE_STRIDE;
-    glBindBuffer(GL_ARRAY_BUFFER, state->instance_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)state->instance_buffer_size, NULL, GL_STREAM_DRAW);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)byte_count, state->instance_cpu_buffer);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    glUseProgram(state->program);
-    glUniform2f(state->u_screen, (float)state->fb_width, (float)state->fb_height);
-    glUniform2f(state->u_cam_center, cam_center_x, cam_center_y);
-    glUniform1f(state->u_cam_zoom, cam_zoom);
-    glBindVertexArray(state->vao);
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)total_instances);
-    glBindVertexArray(0);
-    glUseProgram(0);
 
     if (view && view->debug_line_count > 0 && view->debug_lines_xy && view->debug_line_rgba &&
         state->line_program && state->line_vao) {
@@ -684,7 +726,49 @@ void render_frame(Render *render, const RenderView *view) {
             glLineWidth(1.0f);
         }
     }
+
+    if (hex_ready && state->hex_settings.draw_on_top) {
+        hex_draw_draw(&state->hex_draw,
+                      &state->hex_settings,
+                      state->cam_center,
+                      cam_zoom,
+                      state->fb_width,
+                      state->fb_height);
+    }
 }
+
+void render_set_hex_world(Render *render, const HexWorld *world) {
+    if (!render || !render->state) {
+        return;
+    }
+    RenderState *state = (RenderState *)render->state;
+    state->hex_world = world;
+    state->hex_dirty = true;
+    if (!world) {
+        state->hex_draw.enabled = false;
+    }
+}
+
+void render_set_hex_settings(Render *render, const RenderHexSettings *settings) {
+    if (!render || !render->state) {
+        return;
+    }
+    RenderState *state = (RenderState *)render->state;
+    if (settings) {
+        state->hex_settings = *settings;
+        state->hex_settings_valid = true;
+        if (!state->hex_settings.enabled) {
+            state->hex_draw.enabled = false;
+        }
+    } else {
+        memset(&state->hex_settings, 0, sizeof(state->hex_settings));
+        state->hex_settings.selected_index = -1;
+        state->hex_settings_valid = false;
+        state->hex_draw.enabled = false;
+    }
+    state->hex_dirty = true;
+}
+
 void render_shutdown(Render *render) {
     if (!render || !render->state) {
         return;

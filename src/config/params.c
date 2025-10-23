@@ -70,6 +70,14 @@ void params_init_defaults(Params *params) {
     params->bee.speed_mps = 60.0f;
     params->bee.seek_accel = 220.0f;
     params->bee.arrive_tol_world = params->bee_radius_px * 2.0f;
+
+    params->hex.cell_size = 48.0f;
+    params->hex.q_min = -30;
+    params->hex.q_max = 30;
+    params->hex.r_min = -24;
+    params->hex.r_max = 36;
+    params->hex.draw_on_top = true;
+    params->hex.enabled = true;
 }
 
 bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
@@ -127,6 +135,27 @@ bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
         if (err_buf && err_cap > 0) {
             snprintf(err_buf, err_cap, "bee arrive_tol_world (%.2f) must be > 0",
                      params->bee.arrive_tol_world);
+        }
+        return false;
+    }
+
+    if (params->hex.cell_size <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "hex cell_size (%.2f) must be > 0", params->hex.cell_size);
+        }
+        return false;
+    }
+    if (params->hex.q_max < params->hex.q_min) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "hex q_max (%d) must be >= q_min (%d)",
+                     params->hex.q_max, params->hex.q_min);
+        }
+        return false;
+    }
+    if (params->hex.r_max < params->hex.r_min) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap, "hex r_max (%d) must be >= r_min (%d)",
+                     params->hex.r_max, params->hex.r_min);
         }
         return false;
     }
