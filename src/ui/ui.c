@@ -115,6 +115,7 @@ typedef struct {
     float panel_visible_height;
     float panel_last_width;
     bool hex_draw_on_top;
+    bool hex_heatmap_enabled;
     float info_panel_next_y;
 } UiState;
 
@@ -859,11 +860,35 @@ static void ui_draw_selected_hex_panel(void) {
     snprintf(line, sizeof(line), "TERRAIN %s", ui_hex_terrain_name(info->terrain));
     HEX_ADD_LINE(line, text_color, 18.0f);
 
-    snprintf(line, sizeof(line), "NECTAR %.1F / %.1F UL", info->nectar_stock, info->nectar_capacity);
-    HEX_ADD_LINE(line, text_color, 18.0f);
+    if (info->terrain == HEX_TERRAIN_FLOWERS) {
+        if (info->flower_archetype_name && info->flower_archetype_name[0] != '\0') {
+            snprintf(line, sizeof(line), "ARCHETYPE %s", info->flower_archetype_name);
+            HEX_ADD_LINE(line, accent, 18.0f);
+        } else {
+            snprintf(line, sizeof(line), "ARCHETYPE #%u", (unsigned int)info->flower_archetype_id);
+            HEX_ADD_LINE(line, accent, 18.0f);
+        }
+        snprintf(line, sizeof(line), "NECTAR %.1F / %.1F UL", info->nectar_stock, info->nectar_capacity);
+        HEX_ADD_LINE(line, text_color, 18.0f);
 
-    snprintf(line, sizeof(line), "RECHARGE %.1F UL/S", info->nectar_recharge_rate);
-    HEX_ADD_LINE(line, text_color, 18.0f);
+        snprintf(line, sizeof(line), "RECHARGE BASE %.1F UL/S", info->nectar_recharge_rate);
+        HEX_ADD_LINE(line, text_color, 18.0f);
+
+        float effective_recharge = info->nectar_recharge_rate * info->nectar_recharge_multiplier;
+        snprintf(line, sizeof(line), "DAY MULT x%.2F", info->nectar_recharge_multiplier);
+        HEX_ADD_LINE(line, text_color, 18.0f);
+
+        snprintf(line, sizeof(line), "RECHARGE NOW %.1F UL/S", effective_recharge);
+        HEX_ADD_LINE(line, text_color, 18.0f);
+
+        snprintf(line, sizeof(line), "QUALITY %.2F", info->flower_quality);
+        HEX_ADD_LINE(line, text_color, 18.0f);
+
+        snprintf(line, sizeof(line), "VISCOSITY %.2F", info->flower_viscosity);
+        HEX_ADD_LINE(line, text_color, 18.0f);
+    } else {
+        HEX_ADD_LINE("NO FLORAL DATA", ui_color_rgba(0.6f, 0.65f, 0.7f, 1.0f), 18.0f);
+    }
 
     snprintf(line, sizeof(line), "FLOW CAPACITY %.1F BEES/S", info->flow_capacity);
     HEX_ADD_LINE(line, text_color, 18.0f);
@@ -957,6 +982,7 @@ void ui_init(void) {
     g_ui.selected_hex_valid = false;
     g_ui.hex_panel_open = false;
     g_ui.hex_draw_on_top = false;
+    g_ui.hex_heatmap_enabled = false;
     g_ui.info_panel_next_y = UI_PANEL_MARGIN;
     g_ui.panel_scroll = 0.0f;
     g_ui.panel_content_height = 0.0f;
@@ -1379,6 +1405,23 @@ static void ui_begin_frame(const Input *input) {
     }
     cursor_y += 40.0f;
 
+    UiRect heatmap_rect = {text_x, cursor_y - scroll, content_width, 28.0f};
+    bool heatmap_visible = ui_range_intersects(heatmap_rect.y, heatmap_rect.h, view_top, view_bottom);
+    if (heatmap_visible) {
+        UiColor btn = g_ui.hex_heatmap_enabled ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f);
+        ui_add_rect(heatmap_rect.x, heatmap_rect.y, heatmap_rect.w, heatmap_rect.h, btn);
+    }
+    panel_max_x = fmaxf(panel_max_x, heatmap_rect.x + heatmap_rect.w);
+    if (heatmap_visible &&
+        ui_range_intersects(heatmap_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(heatmap_rect.x + 8.0f, heatmap_rect.y + 6.0f,
+                    g_ui.hex_heatmap_enabled ? "NECTAR HEATMAP" : "NECTAR SOLID", text);
+    }
+    if (mouse_pressed && ui_rect_contains(&heatmap_rect, g_ui.mouse_x, g_ui.mouse_y)) {
+        g_ui.hex_heatmap_enabled = !g_ui.hex_heatmap_enabled;
+    }
+    cursor_y += 40.0f;
+
     UiRect pause_rect = {text_x, cursor_y - scroll, (content_width - 10.0f) * 0.5f, 28.0f};
     UiRect step_rect = {text_x + pause_rect.w + 10.0f, cursor_y - scroll, pause_rect.w, 28.0f};
     bool pause_visible = ui_range_intersects(pause_rect.y, pause_rect.h, view_top, view_bottom);
@@ -1578,4 +1621,8 @@ bool ui_hex_grid_enabled(void) {
 
 bool ui_hex_overlay_on_top(void) {
     return g_ui.hex_draw_on_top;
+}
+
+bool ui_hex_heatmap_enabled(void) {
+    return g_ui.hex_heatmap_enabled;
 }

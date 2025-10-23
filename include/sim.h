@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "bee.h"
+#include "hex.h"
 #include "params.h"
 #include "render.h"
 
@@ -19,6 +20,9 @@ typedef struct SimInit {
 bool sim_init(SimState **out_state, const Params *params);
 // Allocates and initializes the simulation buffers using Params. Returns false
 // on allocation failure or invalid arguments, leaving *out_state untouched.
+
+void sim_bind_hex_world(SimState *state, HexWorld *world);
+// Binds the current hex world to the simulation and rebuilds floral indices.
 
 void sim_tick(SimState *state, float dt_sec);
 // Advances the simulation by dt_sec seconds. No allocations occur here.

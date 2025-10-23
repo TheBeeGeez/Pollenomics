@@ -842,33 +842,11 @@ void render_frame(Render *render, const RenderView *view) {
     }
 
     size_t bee_count = view ? view->count : 0;
-    size_t patch_count = view ? view->patch_count : 0;
-    const bool patch_data_valid = view && view->patch_positions_xy && view->patch_radii_px && view->patch_fill_rgba && view->patch_ring_radii_px && view->patch_ring_rgba;
-    if (!patch_data_valid) {
-        patch_count = 0;
-    }
-    size_t total_instances = bee_count + (patch_count * 2);
+    size_t total_instances = bee_count;
     if (state->program && total_instances > 0) {
         if (ensure_instance_capacity(state, total_instances)) {
-            size_t offset = 0;
-            if (patch_count > 0) {
-                pack_instance_batch(state,
-                                    offset,
-                                    view->patch_positions_xy,
-                                    view->patch_radii_px,
-                                    view->patch_fill_rgba,
-                                    patch_count);
-                offset += patch_count;
-                pack_instance_batch(state,
-                                    offset,
-                                    view->patch_positions_xy,
-                                    view->patch_ring_radii_px,
-                                    view->patch_ring_rgba,
-                                    patch_count);
-                offset += patch_count;
-            }
             pack_instance_batch(state,
-                                offset,
+                                0,
                                 view ? view->positions_xy : NULL,
                                 view ? view->radii_px : NULL,
                                 view ? view->color_rgba : NULL,

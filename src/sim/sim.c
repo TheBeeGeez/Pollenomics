@@ -14,7 +14,7 @@
 #include "sim_internal.h"
 #include "bee_path.h"
 #include "hive.h"
-#include "plants.h"
+#include "world/tiles/tile_flower.h"
 
 static void *alloc_aligned(size_t bytes) {
     if (bytes == 0) {
@@ -60,6 +60,238 @@ static uint32_t make_color(float r, float g, float b, float a) {
     if (bi > 255) bi = 255;
     if (ai > 255) ai = 255;
     return (ri << 24) | (gi << 16) | (bi << 8) | ai;
+}
+
+static void sim_free_floral_index(SimState *state) {
+    if (!state) {
+        return;
+    }
+    free(state->floral_tile_indices);
+    state->floral_tile_indices = NULL;
+    state->floral_tile_count = 0;
+}
+
+static void sim_rebuild_floral_index(SimState *state) {
+    if (!state) {
+        return;
+    }
+    sim_free_floral_index(state);
+    HexWorld *world = state->hex_world;
+    if (!world || world->tile_count == 0) {
+        return;
+    }
+    size_t tile_count = world->tile_count;
+    size_t *indices = (size_t *)malloc(tile_count * sizeof(size_t));
+    if (!indices) {
+        LOG_ERROR("sim: failed to allocate floral index for %zu tiles", tile_count);
+        return;
+    }
+    size_t count = 0;
+    for (size_t i = 0; i < tile_count; ++i) {
+        if (world->tiles[i].terrain == HEX_TERRAIN_FLOWERS && world->tiles[i].nectar_capacity > 0.0f) {
+            indices[count++] = i;
+        }
+    }
+    if (count == 0) {
+        free(indices);
+        return;
+    }
+    size_t *shrink = (size_t *)realloc(indices, count * sizeof(size_t));
+    state->floral_tile_indices = shrink ? shrink : indices;
+    state->floral_tile_count = count;
+}
+
+static bool sim_has_floral_tiles(const SimState *state) {
+    return state && state->hex_world && state->floral_tile_count > 0 && state->floral_tile_indices;
+}
+
+static const HexTile *sim_get_tile_const(const SimState *state, int32_t id) {
+    if (!state || !state->hex_world || id < 0) {
+        return NULL;
+    }
+    size_t index = (size_t)id;
+    if (index >= state->hex_world->tile_count) {
+        return NULL;
+    }
+    return &state->hex_world->tiles[index];
+}
+
+static HexTile *sim_get_tile(SimState *state, int32_t id) {
+    if (!state || !state->hex_world || id < 0) {
+        return NULL;
+    }
+    size_t index = (size_t)id;
+    if (index >= state->hex_world->tile_count) {
+        return NULL;
+    }
+    return &state->hex_world->tiles[index];
+}
+
+static void sim_tile_center(const SimState *state, size_t index, float *out_x, float *out_y) {
+    if (!state || !state->hex_world || !state->hex_world->centers_world_xy) {
+        if (out_x) *out_x = 0.0f;
+        if (out_y) *out_y = 0.0f;
+        return;
+    }
+    if (index >= state->hex_world->tile_count) {
+        if (out_x) *out_x = 0.0f;
+        if (out_y) *out_y = 0.0f;
+        return;
+    }
+    const float *centers = state->hex_world->centers_world_xy;
+    if (out_x) {
+        *out_x = centers[index * 2 + 0];
+    }
+    if (out_y) {
+        *out_y = centers[index * 2 + 1];
+    }
+}
+
+static bool sim_any_floral_available(const SimState *state) {
+    if (!sim_has_floral_tiles(state)) {
+        return false;
+    }
+    const HexWorld *world = state->hex_world;
+    for (size_t i = 0; i < state->floral_tile_count; ++i) {
+        size_t tile_index = state->floral_tile_indices[i];
+        if (tile_index < world->tile_count) {
+            if (world->tiles[tile_index].nectar_stock > 0.5f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static float sim_tile_score(const HexWorld *world, size_t tile_index, float from_x, float from_y) {
+    const float *centers = world->centers_world_xy;
+    float cx = centers[tile_index * 2 + 0];
+    float cy = centers[tile_index * 2 + 1];
+    float dx = cx - from_x;
+    float dy = cy - from_y;
+    float distance_sq = dx * dx + dy * dy;
+    const HexTile *tile = &world->tiles[tile_index];
+    float quality = tile->flower_quality;
+    if (quality < 0.05f) {
+        quality = 0.05f;
+    }
+    float stock_ratio = (tile->nectar_capacity > 0.0f) ? (tile->nectar_stock / tile->nectar_capacity) : 0.0f;
+    float weight = 1.0f + quality * 0.75f + stock_ratio * 0.5f;
+    return distance_sq / weight;
+}
+
+static int32_t sim_choose_floral_tile(const SimState *state, float from_x, float from_y, uint64_t *rng_state) {
+    if (!sim_has_floral_tiles(state)) {
+        return -1;
+    }
+    const HexWorld *world = state->hex_world;
+    size_t best_index = SIZE_MAX;
+    float best_score = FLT_MAX;
+    size_t fallback_index = SIZE_MAX;
+    float fallback_stock = 0.0f;
+
+    for (size_t i = 0; i < state->floral_tile_count; ++i) {
+        size_t tile_index = state->floral_tile_indices[i];
+        if (tile_index >= world->tile_count) {
+            continue;
+        }
+        const HexTile *tile = &world->tiles[tile_index];
+        if (tile->terrain != HEX_TERRAIN_FLOWERS || tile->nectar_capacity <= 0.0f) {
+            continue;
+        }
+        if (tile->nectar_stock > fallback_stock) {
+            fallback_stock = tile->nectar_stock;
+            fallback_index = tile_index;
+        }
+        if (tile->nectar_stock <= 0.5f) {
+            continue;
+        }
+        float score = sim_tile_score(world, tile_index, from_x, from_y);
+        if (rng_state) {
+            float jitter = 0.95f + 0.1f * rand_uniform01(rng_state);
+            score *= jitter;
+        }
+        if (score < best_score) {
+            best_score = score;
+            best_index = tile_index;
+        }
+    }
+
+    if (best_index != SIZE_MAX) {
+        if (best_index > (size_t)INT32_MAX) {
+            return -1;
+        }
+        return (int32_t)best_index;
+    }
+    if (fallback_index != SIZE_MAX && fallback_stock > 0.0f) {
+        if (fallback_index > (size_t)INT32_MAX) {
+            return -1;
+        }
+        return (int32_t)fallback_index;
+    }
+    return -1;
+}
+
+static float sim_diurnal_multiplier(const SimState *state) {
+    if (!state) {
+        return 1.0f;
+    }
+    float period = state->floral_day_period_sec;
+    if (period <= 0.0f) {
+        period = 120.0f;
+    }
+    float t = fmodf(state->floral_clock_sec, period);
+    float day_fraction = period * 0.5f;
+    if (t <= day_fraction) {
+        return 1.0f;
+    }
+    float night_scale = state->floral_night_scale;
+    if (night_scale <= 0.0f) {
+        night_scale = 0.25f;
+    }
+    return night_scale;
+}
+
+static void sim_tiles_recharge(SimState *state, float dt_sec) {
+    if (!state || !state->hex_world || dt_sec <= 0.0f) {
+        return;
+    }
+    if (!sim_has_floral_tiles(state)) {
+        return;
+    }
+    float multiplier = sim_diurnal_multiplier(state);
+    HexWorld *world = state->hex_world;
+    for (size_t i = 0; i < state->floral_tile_count; ++i) {
+        size_t tile_index = state->floral_tile_indices[i];
+        if (tile_index >= world->tile_count) {
+            continue;
+        }
+        HexTile *tile = &world->tiles[tile_index];
+        if (tile->terrain != HEX_TERRAIN_FLOWERS || tile->nectar_capacity <= 0.0f || tile->nectar_recharge_rate <= 0.0f) {
+            tile->nectar_recharge_multiplier = multiplier;
+            continue;
+        }
+        tile->nectar_recharge_multiplier = multiplier;
+        float recharge = tile->nectar_recharge_rate * multiplier * dt_sec;
+        tile->nectar_stock += recharge;
+        if (tile->nectar_stock > tile->nectar_capacity) {
+            tile->nectar_stock = tile->nectar_capacity;
+        }
+        if (tile->nectar_stock < 0.0f) {
+            tile->nectar_stock = 0.0f;
+        }
+        if (world->flower_system) {
+            tile_flower_override_payload(world->flower_system,
+                                         world,
+                                         tile_index,
+                                         tile->nectar_capacity,
+                                         tile->nectar_stock,
+                                         tile->nectar_recharge_rate,
+                                         tile->nectar_recharge_multiplier,
+                                         tile->flower_quality,
+                                         tile->flower_viscosity);
+        }
+    }
 }
 
 static uint32_t bee_mode_color(uint8_t mode) {
@@ -213,8 +445,6 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
 
     uint64_t rng = state->rng_state;
 
-    plants_generate(state, &rng);
-
     for (size_t i = 0; i < state->count; ++i) {
         size_t col = i % cols;
         size_t row = i / cols;
@@ -339,6 +569,7 @@ static void sim_release(SimState *state) {
     free_aligned(state->path_waypoint_y);
     free_aligned(state->path_has_waypoint);
     free_aligned(state->path_valid);
+    sim_free_floral_index(state);
     free(state);
 }
 
@@ -366,6 +597,12 @@ bool sim_init(SimState **out_state, const Params *params) {
                                                    : (float)params->window_width_px;
     state->world_h = params->world_height_px > 0.0f ? params->world_height_px
                                                    : (float)params->window_height_px;
+    state->hex_world = NULL;
+    state->floral_tile_indices = NULL;
+    state->floral_tile_count = 0;
+    state->floral_clock_sec = 0.0f;
+    state->floral_day_period_sec = 120.0f;
+    state->floral_night_scale = 0.25f;
     configure_from_params(state, params);
 
     size_t count = state->capacity;
@@ -423,6 +660,18 @@ bool sim_init(SimState **out_state, const Params *params) {
     return true;
 }
 
+void sim_bind_hex_world(SimState *state, HexWorld *world) {
+    if (!state) {
+        return;
+    }
+    state->hex_world = world;
+    if (!world) {
+        sim_free_floral_index(state);
+        return;
+    }
+    sim_rebuild_floral_index(state);
+}
+
 void sim_tick(SimState *state, float dt_sec) {
     if (!state || state->count == 0) {
         return;
@@ -432,7 +681,8 @@ void sim_tick(SimState *state, float dt_sec) {
         return;
     }
 
-    plants_replenish(state, dt_sec);
+    state->floral_clock_sec += dt_sec;
+    sim_tiles_recharge(state, dt_sec);
 
     uint64_t rng = state->rng_state;
     const float world_w = state->world_w;
@@ -453,13 +703,7 @@ void sim_tick(SimState *state, float dt_sec) {
     float speed_min_tick = FLT_MAX;
     float speed_max_tick = 0.0f;
     uint64_t bounce_counter = 0;
-    bool any_patch_available = false;
-    for (size_t pi = 0; pi < state->patch_count; ++pi) {
-        if (state->patches[pi].stock > 0.5f) {
-            any_patch_available = true;
-            break;
-        }
-    }
+    bool any_patch_available = sim_any_floral_available(state);
 
     for (size_t i = 0; i < state->count; ++i) {
         float x = state->x[i];
@@ -482,7 +726,12 @@ void sim_tick(SimState *state, float dt_sec) {
         }
         float harvest_rate = state->harvest_rate_uLps[i] > 0.0f ? state->harvest_rate_uLps[i] : state->bee_harvest_rate_uLps;
 
-        const FlowerPatch *target_patch = plants_get_patch_const(state, target_id);
+        const HexTile *target_tile = sim_get_tile_const(state, target_id);
+        float tile_center_x = target_x;
+        float tile_center_y = target_y;
+        if (target_tile) {
+            sim_tile_center(state, (size_t)target_id, &tile_center_x, &tile_center_y);
+        }
         bool inside_hive_now = state->hive_enabled &&
                                x >= state->hive_rect_x &&
                                x <= state->hive_rect_x + state->hive_rect_w &&
@@ -490,11 +739,11 @@ void sim_tick(SimState *state, float dt_sec) {
                                y <= state->hive_rect_y + state->hive_rect_h;
 
         float current_arrive_tol = arrive_tol;
-        if (target_patch && (prev_mode == BEE_MODE_OUTBOUND || prev_mode == BEE_MODE_FORAGING ||
-                             prev_intent == BEE_INTENT_FIND_PATCH || prev_intent == BEE_INTENT_HARVEST)) {
-            float patch_tol = target_patch->radius * 0.6f;
-            if (patch_tol > current_arrive_tol) {
-                current_arrive_tol = patch_tol;
+        if (target_tile && (prev_mode == BEE_MODE_OUTBOUND || prev_mode == BEE_MODE_FORAGING ||
+                            prev_intent == BEE_INTENT_FIND_PATCH || prev_intent == BEE_INTENT_HARVEST)) {
+            float tile_tol = state->hex_world ? state->hex_world->cell_radius * 0.6f : state->default_radius * 2.0f;
+            if (tile_tol > current_arrive_tol) {
+                current_arrive_tol = tile_tol;
             }
         }
 
@@ -509,9 +758,9 @@ void sim_tick(SimState *state, float dt_sec) {
             .energy = energy,
             .load_uL = load,
             .capacity_uL = capacity,
-            .patch_stock = target_patch ? target_patch->stock : 0.0f,
-            .patch_capacity = target_patch ? target_patch->capacity : 0.0f,
-            .patch_quality = target_patch ? target_patch->quality : 0.0f,
+            .patch_stock = target_tile ? target_tile->nectar_stock : 0.0f,
+            .patch_capacity = target_tile ? target_tile->nectar_capacity : 0.0f,
+            .patch_quality = target_tile ? target_tile->flower_quality : 0.0f,
             .state_time = prev_t_state,
             .dt_sec = dt_sec,
             .hive_center_x = state->hive_rect_w > 0.0f ? state->hive_rect_x + state->hive_rect_w * 0.5f : world_w * 0.5f,
@@ -520,8 +769,8 @@ void sim_tick(SimState *state, float dt_sec) {
             .entrance_y = entrance_y,
             .unload_x = unload_x,
             .unload_y = unload_y,
-            .forage_target_x = target_patch ? target_patch->x : target_x,
-            .forage_target_y = target_patch ? target_patch->y : target_y,
+            .forage_target_x = target_tile ? tile_center_x : target_x,
+            .forage_target_y = target_tile ? tile_center_y : target_y,
             .arrive_tol = current_arrive_tol,
             .role = state->role[i],
             .previous_mode = prev_mode,
@@ -539,30 +788,37 @@ void sim_tick(SimState *state, float dt_sec) {
         bool mode_changed = (mode != prev_mode);
 
         if (mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) {
-            if (target_id < 0 || !plants_get_patch_const(state, target_id)) {
-                target_id = plants_choose_patch(state, x, y, &rng);
-                mode_changed = true;
+            if (target_id < 0 || !sim_get_tile_const(state, target_id)) {
+                int32_t chosen = sim_choose_floral_tile(state, x, y, &rng);
+                if (chosen != target_id) {
+                    target_id = chosen;
+                    mode_changed = true;
+                }
             }
         }
 
-        target_patch = plants_get_patch_const(state, target_id);
-        if ((mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) && !target_patch) {
+        target_tile = sim_get_tile_const(state, target_id);
+        if ((mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) && !target_tile) {
             intent = BEE_INTENT_REST;
             mode = BEE_MODE_IDLE;
             target_id = -1;
         }
 
-        if (mode == BEE_MODE_OUTBOUND && target_patch) {
+        if (target_tile) {
+            sim_tile_center(state, (size_t)target_id, &tile_center_x, &tile_center_y);
+        }
+
+        if (mode == BEE_MODE_OUTBOUND && target_tile) {
             if (mode_changed || target_id != state->target_id[i]) {
-                float sample_x = target_patch->x;
-                float sample_y = target_patch->y;
-                plants_sample_point(target_patch, &rng, &sample_x, &sample_y);
-                target_x = sample_x;
-                target_y = sample_y;
+                float jitter_angle = rand_uniform01(&rng) * TWO_PI;
+                float jitter_radius = state->hex_world ? state->hex_world->cell_radius * 0.35f
+                                                       : state->default_radius * 1.5f;
+                target_x = tile_center_x + cosf(jitter_angle) * jitter_radius;
+                target_y = tile_center_y + sinf(jitter_angle) * jitter_radius;
             }
-        } else if (mode == BEE_MODE_FORAGING && target_patch) {
-            target_x = target_patch->x;
-            target_y = target_patch->y;
+        } else if (mode == BEE_MODE_FORAGING && target_tile) {
+            target_x = tile_center_x;
+            target_y = tile_center_y;
         } else if (mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING) {
             target_x = entrance_x;
             target_y = entrance_y;
@@ -572,10 +828,10 @@ void sim_tick(SimState *state, float dt_sec) {
         }
 
         current_arrive_tol = arrive_tol;
-        if (target_patch && mode == BEE_MODE_FORAGING) {
-            float patch_tol = target_patch->radius * 0.5f;
-            if (patch_tol > current_arrive_tol) {
-                current_arrive_tol = patch_tol;
+        if (target_tile && mode == BEE_MODE_FORAGING) {
+            float tile_tol = state->hex_world ? state->hex_world->cell_radius * 0.5f : state->default_radius * 1.5f;
+            if (tile_tol > current_arrive_tol) {
+                current_arrive_tol = tile_tol;
             }
         }
 
@@ -719,16 +975,24 @@ void sim_tick(SimState *state, float dt_sec) {
         }
 
         if (mode == BEE_MODE_FORAGING) {
-            FlowerPatch *patch_mut = plants_get_patch(state, target_id);
-            if (patch_mut && patch_mut->stock > 0.0f) {
-                float patch_factor = 0.6f + 0.4f * patch_mut->quality;
-                float harvest = harvest_rate * patch_factor * dt_sec;
+            HexTile *tile_mut = sim_get_tile(state, target_id);
+            if (tile_mut && tile_mut->nectar_stock > 0.0f) {
+                float patch_factor = 0.6f + 0.4f * tile_mut->flower_quality;
+                float request = harvest_rate * patch_factor * dt_sec;
                 float space = capacity - load;
-                if (harvest > space) harvest = space;
-                if (harvest > patch_mut->stock) harvest = patch_mut->stock;
-                if (harvest > 0.0f) {
-                    load += harvest;
-                    patch_mut->stock -= harvest;
+                if (request > space) request = space;
+                if (request > 0.0f) {
+                    float harvested = hex_world_tile_harvest(state->hex_world, (size_t)target_id, request, NULL);
+                    if (harvested > space) {
+                        harvested = space;
+                    }
+                    if (harvested > 0.0f) {
+                        load += harvested;
+                    }
+                }
+                if (tile_mut->nectar_stock <= 0.5f) {
+                    target_id = -1;
+                    target_tile = NULL;
                 }
             }
         } else if (mode == BEE_MODE_UNLOADING) {
@@ -838,37 +1102,6 @@ RenderView sim_build_view(SimState *state) {
     view.positions_xy = state->scratch_xy;
     view.radii_px = state->radius;
     view.color_rgba = state->color_rgba;
-    view.patch_positions_xy = state->patch_positions_xy;
-    view.patch_radii_px = state->patch_radii_px;
-    view.patch_fill_rgba = state->patch_fill_rgba;
-    view.patch_ring_radii_px = state->patch_ring_radii_px;
-    view.patch_ring_rgba = state->patch_ring_rgba;
-    view.patch_count = state->patch_count;
-
-    for (size_t i = 0; i < state->patch_count && i < SIM_MAX_FLOWER_PATCHES; ++i) {
-        const FlowerPatch *patch = &state->patches[i];
-        state->patch_positions_xy[2 * i + 0] = patch->x;
-        state->patch_positions_xy[2 * i + 1] = patch->y;
-        state->patch_radii_px[i] = patch->radius;
-
-        float quality = clampf(patch->quality, 0.0f, 1.0f);
-        float fill_r = 0.18f + 0.10f * (1.0f - quality);
-        float fill_g = 0.45f + 0.30f * quality;
-        float fill_b = 0.18f;
-        float fill_a = 0.16f;
-        state->patch_fill_rgba[i] = make_color(fill_r, fill_g, fill_b, fill_a);
-
-        float stock_ratio = (patch->capacity > 0.0f) ? patch->stock / patch->capacity : 0.0f;
-        if (stock_ratio < 0.0f) stock_ratio = 0.0f;
-        if (stock_ratio > 1.0f) stock_ratio = 1.0f;
-
-        float ring_r = 0.75f - 0.45f * stock_ratio;
-        float ring_g = 0.25f + 0.50f * stock_ratio;
-        float ring_b = 0.10f;
-        float ring_a = 0.85f;
-        state->patch_ring_rgba[i] = make_color(ring_r, ring_g, ring_b, ring_a);
-        state->patch_ring_radii_px[i] = patch->radius * stock_ratio;
-    }
 
     return view;
 }

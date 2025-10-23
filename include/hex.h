@@ -6,24 +6,23 @@
 #include <stdint.h>
 
 #include "params.h"
+#include "tile_core.h"
 
-typedef enum HexTerrain {
-    HEX_TERRAIN_OPEN = 0,
-    HEX_TERRAIN_FOREST = 1,
-    HEX_TERRAIN_MOUNTAIN = 2,
-    HEX_TERRAIN_WATER = 3,
-    HEX_TERRAIN_HIVE = 4,
-    HEX_TERRAIN_FLOWERS = 5,
-    HEX_TERRAIN_ENTRANCE = 6,
-    HEX_TERRAIN_COUNT
-} HexTerrain;
+typedef TileTerrain HexTerrain;
+
+struct FlowerSystem;
 
 typedef struct HexTile {
     HexTerrain terrain;
     float nectar_stock;
     float nectar_capacity;
     float nectar_recharge_rate;
+    float nectar_recharge_multiplier;
+    float flower_quality;
+    float flower_viscosity;
+    int16_t patch_id;
     float flow_capacity;
+    uint16_t flower_archetype_id;
 } HexTile;
 
 typedef struct HexTileDebugInfo {
@@ -35,7 +34,12 @@ typedef struct HexTileDebugInfo {
     float nectar_stock;
     float nectar_capacity;
     float nectar_recharge_rate;
+    float nectar_recharge_multiplier;
+    float flower_quality;
+    float flower_viscosity;
     float flow_capacity;
+    uint16_t flower_archetype_id;
+    const char *flower_archetype_name;
 } HexTileDebugInfo;
 
 typedef struct HexWorld {
@@ -55,6 +59,8 @@ typedef struct HexWorld {
     float *centers_world_xy;
     uint32_t *fill_rgba;
     uint32_t palette[HEX_TERRAIN_COUNT];
+    TileRegistry tile_registry;
+    struct FlowerSystem *flower_system;
 } HexWorld;
 
 bool hex_world_init(HexWorld *world, const Params *params);
@@ -77,5 +83,17 @@ void hex_world_world_to_axial(const HexWorld *world, float world_x, float world_
 void hex_world_axial_round(float qf, float rf, int *out_q, int *out_r);
 bool hex_world_pick(const HexWorld *world, float world_x, float world_y, int *out_q, int *out_r);
 void hex_world_tile_corners(const HexWorld *world, int q, int r, float (*out_xy)[2]);
+
+bool hex_world_tile_from_world(const HexWorld *world, float world_x, float world_y, size_t *out_index);
+bool hex_world_tile_is_floral(const HexWorld *world, size_t index);
+float hex_world_tile_harvest(HexWorld *world, size_t index, float request_uL, float *quality_out);
+void hex_world_tile_set_floral(HexWorld *world,
+                               size_t index,
+                               float capacity,
+                               float stock,
+                               float recharge_rate,
+                               float quality,
+                               float viscosity);
+void hex_world_apply_palette(HexWorld *world, bool nectar_heatmap_enabled);
 
 #endif  // HEX_H
