@@ -13,7 +13,6 @@ add_executable(bee_sim
   src/sim/bee.c
   src/sim/bee_path.c
   src/sim/hive.c
-  src/sim/plants.c
   src/sim/sim.c
   src/world/hex_world.c
   src/platform/sdl_io.c

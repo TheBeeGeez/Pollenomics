@@ -23,6 +23,10 @@ typedef struct HexTile {
     float nectar_stock;
     float nectar_capacity;
     float nectar_recharge_rate;
+    float nectar_recharge_multiplier;
+    float flower_quality;
+    float flower_viscosity;
+    int16_t patch_id;
     float flow_capacity;
 } HexTile;
 
@@ -35,6 +39,9 @@ typedef struct HexTileDebugInfo {
     float nectar_stock;
     float nectar_capacity;
     float nectar_recharge_rate;
+    float nectar_recharge_multiplier;
+    float flower_quality;
+    float flower_viscosity;
     float flow_capacity;
 } HexTileDebugInfo;
 
@@ -77,5 +84,17 @@ void hex_world_world_to_axial(const HexWorld *world, float world_x, float world_
 void hex_world_axial_round(float qf, float rf, int *out_q, int *out_r);
 bool hex_world_pick(const HexWorld *world, float world_x, float world_y, int *out_q, int *out_r);
 void hex_world_tile_corners(const HexWorld *world, int q, int r, float (*out_xy)[2]);
+
+bool hex_world_tile_from_world(const HexWorld *world, float world_x, float world_y, size_t *out_index);
+bool hex_world_tile_is_floral(const HexWorld *world, size_t index);
+float hex_world_tile_harvest(HexWorld *world, size_t index, float request_uL, float *quality_out);
+void hex_world_tile_set_floral(HexWorld *world,
+                               size_t index,
+                               float capacity,
+                               float stock,
+                               float recharge_rate,
+                               float quality,
+                               float viscosity);
+void hex_world_apply_palette(HexWorld *world, bool nectar_heatmap_enabled);
 
 #endif  // HEX_H

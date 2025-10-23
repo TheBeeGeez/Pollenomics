@@ -10,8 +10,9 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+#include "hex.h"
+
 #define TWO_PI (2.0f * (float)M_PI)
-#define SIM_MAX_FLOWER_PATCHES 8
 
 typedef struct HiveSegment {
     float ax;
@@ -21,17 +22,6 @@ typedef struct HiveSegment {
     float nx;
     float ny;
 } HiveSegment;
-
-typedef struct FlowerPatch {
-    float x;
-    float y;
-    float radius;
-    float quality;
-    float stock;
-    float capacity;
-    float replenish_rate;
-    float initial_stock;
-} FlowerPatch;
 
 typedef struct SimState {
     size_t count;
@@ -98,8 +88,12 @@ typedef struct SimState {
     HiveSegment hive_segments[8];
     size_t hive_segment_count;
 
-    size_t patch_count;
-    FlowerPatch patches[SIM_MAX_FLOWER_PATCHES];
+    HexWorld *hex_world;
+    size_t *floral_tile_indices;
+    size_t floral_tile_count;
+    float floral_clock_sec;
+    float floral_day_period_sec;
+    float floral_night_scale;
     float bee_capacity_uL;
     float bee_harvest_rate_uLps;
     float bee_unload_rate_uLps;
@@ -107,11 +101,6 @@ typedef struct SimState {
     float bee_speed_mps;
     float bee_seek_accel;
     float bee_arrive_tol_world;
-    float patch_positions_xy[SIM_MAX_FLOWER_PATCHES * 2];
-    float patch_radii_px[SIM_MAX_FLOWER_PATCHES];
-    uint32_t patch_fill_rgba[SIM_MAX_FLOWER_PATCHES];
-    float patch_ring_radii_px[SIM_MAX_FLOWER_PATCHES];
-    uint32_t patch_ring_rgba[SIM_MAX_FLOWER_PATCHES];
 } SimState;
 
 static inline float clampf(float v, float lo, float hi) {

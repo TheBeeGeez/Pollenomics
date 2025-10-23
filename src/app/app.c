@@ -222,6 +222,7 @@ bool app_init(const Params *params) {
         plat_shutdown(&g_platform);
         return false;
     }
+    sim_bind_hex_world(g_sim, &g_hex_world);
     LOG_INFO("app_init: sim ready");
 
     int init_fb_w = g_params.window_width_px;
@@ -279,6 +280,7 @@ static bool app_apply_runtime_params(bool reinit_required) {
         }
         sim_shutdown(g_sim);
         g_sim = fresh;
+        sim_bind_hex_world(g_sim, &g_hex_world);
         g_sim_accumulator_sec = 0.0;
     } else if (g_sim) {
         sim_apply_runtime_params(g_sim, &new_params);
@@ -298,6 +300,9 @@ static bool app_apply_runtime_params(bool reinit_required) {
         if (g_selected_hex_index >= tile_count) {
             g_selected_hex_index = SIZE_MAX;
             ui_set_selected_hex(NULL, false);
+        }
+        if (g_sim) {
+            sim_bind_hex_world(g_sim, &g_hex_world);
         }
     }
 
@@ -532,6 +537,7 @@ void app_frame(void) {
         ui_set_selected_hex(NULL, false);
     }
     if (hex_tile_count > 0) {
+        hex_world_apply_palette(&g_hex_world, ui_hex_heatmap_enabled());
         hex_view.centers_world_xy = hex_world_centers_xy(&g_hex_world);
         hex_view.scale_world = NULL;
         hex_view.fill_rgba = hex_world_colors_rgba(&g_hex_world);

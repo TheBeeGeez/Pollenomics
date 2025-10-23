@@ -31,5 +31,6 @@ void ui_set_selected_bee(const BeeDebugInfo *info, bool valid);
 void ui_set_selected_hex(const HexTileDebugInfo *info, bool valid);
 bool ui_hex_grid_enabled(void);
 bool ui_hex_overlay_on_top(void);
+bool ui_hex_heatmap_enabled(void);
 
 #endif  // UI_H

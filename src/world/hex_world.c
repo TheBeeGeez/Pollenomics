@@ -1,6 +1,7 @@
 #include "hex.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,6 +26,21 @@ static uint32_t make_color_rgba(float r, float g, float b, float a) {
     if (bi > 255U) bi = 255U;
     if (ai > 255U) ai = 255U;
     return (ri << 24) | (gi << 16) | (bi << 8) | ai;
+}
+
+static uint32_t modulate_color(uint32_t rgba, float multiplier) {
+    if (multiplier < 0.0f) {
+        multiplier = 0.0f;
+    }
+    const float inv255 = 1.0f / 255.0f;
+    float r = ((float)((rgba >> 24) & 0xFFu)) * inv255;
+    float g = ((float)((rgba >> 16) & 0xFFu)) * inv255;
+    float b = ((float)((rgba >> 8) & 0xFFu)) * inv255;
+    float a = ((float)(rgba & 0xFFu)) * inv255;
+    r *= multiplier;
+    g *= multiplier;
+    b *= multiplier;
+    return make_color_rgba(r, g, b, a);
 }
 
 static void hex_world_setup_palette(HexWorld *world) {
@@ -56,6 +72,10 @@ static void assign_tile_properties(HexTile *tile, HexTerrain terrain) {
     tile->nectar_stock = 0.0f;
     tile->nectar_capacity = 0.0f;
     tile->nectar_recharge_rate = 0.0f;
+    tile->nectar_recharge_multiplier = 1.0f;
+    tile->flower_quality = 0.0f;
+    tile->flower_viscosity = 1.0f;
+    tile->patch_id = -1;
     tile->flow_capacity = 10.0f;
 
     switch (terrain) {
@@ -75,6 +95,8 @@ static void assign_tile_properties(HexTile *tile, HexTerrain terrain) {
             tile->nectar_capacity = 180.0f;
             tile->nectar_stock = 120.0f;
             tile->nectar_recharge_rate = 12.0f;
+            tile->flower_quality = 0.75f;
+            tile->flower_viscosity = 1.0f;
             tile->flow_capacity = 18.0f;
             break;
         case HEX_TERRAIN_ENTRANCE:
@@ -335,6 +357,9 @@ bool hex_world_tile_debug_info(const HexWorld *world, size_t index, HexTileDebug
     out_info->nectar_stock = tile->nectar_stock;
     out_info->nectar_capacity = tile->nectar_capacity;
     out_info->nectar_recharge_rate = tile->nectar_recharge_rate;
+    out_info->nectar_recharge_multiplier = tile->nectar_recharge_multiplier;
+    out_info->flower_quality = tile->flower_quality;
+    out_info->flower_viscosity = tile->flower_viscosity;
     out_info->flow_capacity = tile->flow_capacity;
     return true;
 }
@@ -435,6 +460,131 @@ void hex_world_tile_corners(const HexWorld *world, int q, int r, float (*out_xy)
         float py = cy + radius * sinf(angle_rad);
         out_xy[i][0] = px;
         out_xy[i][1] = py;
+    }
+}
+
+bool hex_world_tile_from_world(const HexWorld *world, float world_x, float world_y, size_t *out_index) {
+    if (!world || !out_index) {
+        return false;
+    }
+    int q = 0;
+    int r = 0;
+    if (!hex_world_pick(world, world_x, world_y, &q, &r)) {
+        return false;
+    }
+    size_t index = hex_world_index(world, q, r);
+    if (index == (size_t)SIZE_MAX) {
+        return false;
+    }
+    *out_index = index;
+    return true;
+}
+
+bool hex_world_tile_is_floral(const HexWorld *world, size_t index) {
+    if (!world || index >= world->tile_count) {
+        return false;
+    }
+    const HexTile *tile = &world->tiles[index];
+    return tile->terrain == HEX_TERRAIN_FLOWERS && tile->nectar_capacity > 0.0f;
+}
+
+float hex_world_tile_harvest(HexWorld *world, size_t index, float request_uL, float *quality_out) {
+    if (!world || index >= world->tile_count || request_uL <= 0.0f) {
+        if (quality_out) {
+            *quality_out = 0.0f;
+        }
+        return 0.0f;
+    }
+    HexTile *tile = &world->tiles[index];
+    if (!hex_world_tile_is_floral(world, index)) {
+        if (quality_out) {
+            *quality_out = 0.0f;
+        }
+        return 0.0f;
+    }
+
+    float viscosity = tile->flower_viscosity;
+    if (viscosity <= 0.0f) {
+        viscosity = 1.0f;
+    }
+    float viscosity_scale = 1.0f / sqrtf(viscosity);
+    if (viscosity_scale < 0.05f) {
+        viscosity_scale = 0.05f;
+    }
+
+    float harvest = request_uL * viscosity_scale;
+    if (harvest > tile->nectar_stock) {
+        harvest = tile->nectar_stock;
+    }
+    if (harvest <= 0.0f) {
+        if (quality_out) {
+            *quality_out = tile->flower_quality;
+        }
+        return 0.0f;
+    }
+
+    tile->nectar_stock -= harvest;
+    if (tile->nectar_stock < 0.0f) {
+        tile->nectar_stock = 0.0f;
+    }
+    if (quality_out) {
+        *quality_out = tile->flower_quality;
+    }
+    return harvest;
+}
+
+void hex_world_tile_set_floral(HexWorld *world,
+                               size_t index,
+                               float capacity,
+                               float stock,
+                               float recharge_rate,
+                               float quality,
+                               float viscosity) {
+    if (!world || index >= world->tile_count) {
+        return;
+    }
+    HexTile *tile = &world->tiles[index];
+    tile->terrain = HEX_TERRAIN_FLOWERS;
+    tile->nectar_capacity = capacity >= 0.0f ? capacity : 0.0f;
+    if (stock < 0.0f) {
+        stock = 0.0f;
+    }
+    if (stock > tile->nectar_capacity && tile->nectar_capacity > 0.0f) {
+        stock = tile->nectar_capacity;
+    }
+    tile->nectar_stock = stock;
+    tile->nectar_recharge_rate = recharge_rate >= 0.0f ? recharge_rate : 0.0f;
+    if (quality < 0.0f) quality = 0.0f;
+    if (quality > 1.0f) quality = 1.0f;
+    tile->flower_quality = quality;
+    if (viscosity <= 0.0f) {
+        viscosity = 1.0f;
+    }
+    tile->flower_viscosity = viscosity;
+    tile->nectar_recharge_multiplier = 1.0f;
+    tile->patch_id = -1;
+}
+
+void hex_world_apply_palette(HexWorld *world, bool nectar_heatmap_enabled) {
+    if (!world || !world->fill_rgba) {
+        return;
+    }
+    for (size_t i = 0; i < world->tile_count; ++i) {
+        const HexTile *tile = &world->tiles[i];
+        uint32_t base = world->palette[tile->terrain];
+        if (nectar_heatmap_enabled && tile->terrain == HEX_TERRAIN_FLOWERS && tile->nectar_capacity > 0.0f) {
+            float ratio = tile->nectar_stock / tile->nectar_capacity;
+            if (ratio < 0.0f) {
+                ratio = 0.0f;
+            }
+            if (ratio > 1.0f) {
+                ratio = 1.0f;
+            }
+            float brightness = 0.25f + 0.75f * ratio;
+            world->fill_rgba[i] = modulate_color(base, brightness);
+        } else {
+            world->fill_rgba[i] = base;
+        }
     }
 }
 
