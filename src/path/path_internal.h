@@ -18,6 +18,7 @@ bool path_fields_start_build(PathGoal goal,
                              const int32_t *neighbors,
                              const TileId *goals,
                              size_t goal_count,
+                             const float *goal_seed_costs,
                              const float *eff_cost,
                              const TileId *dirty_tiles,
                              size_t dirty_count);
@@ -37,7 +38,8 @@ void path_debug_reset_overlay(void);
 bool path_debug_build_overlay(const struct HexWorld *world,
                               PathGoal goal,
                               const uint8_t *next,
-                              size_t tile_count);
+                              size_t tile_count,
+                              uint32_t color_rgba);
 
 void path_sched_reset_state(void);
 void path_sched_shutdown_state(void);
@@ -45,6 +47,7 @@ void path_sched_set_goal_data(PathGoal goal,
                               const struct HexWorld *world,
                               const int32_t *neighbors,
                               const TileId *goals,
+                              const float *goal_seed_costs,
                               size_t goal_count,
                               size_t tile_count);
 bool path_sched_update(float dt_sec, bool out_field_swapped[PATH_GOAL_COUNT]);

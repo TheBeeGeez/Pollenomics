@@ -20,6 +20,7 @@ typedef struct PathSchedGoalState {
     const TileId *goals;
     size_t goal_count;
     size_t tile_count;
+    const float *goal_seed_costs;
     size_t nodes_relaxed_accum;
     double elapsed_ms_accum;
     float last_build_ms;
@@ -40,7 +41,7 @@ typedef struct PathSchedulerState {
 
 static PathSchedulerState g_sched = {0};
 
-static const float kDefaultCadenceHz[PATH_GOAL_COUNT] = {10.0f, 6.0f};
+static const float kDefaultCadenceHz[] = {10.0f, 6.0f, 3.0f};
 
 static inline double cadence_to_interval(float hz) {
     return (hz > 0.0f) ? (1000.0 / (double)hz) : 0.0;
@@ -73,6 +74,7 @@ static void clear_goal_state(PathSchedGoalState *state, int goal_index) {
     state->goals = NULL;
     state->goal_count = 0u;
     state->tile_count = 0u;
+    state->goal_seed_costs = NULL;
     state->nodes_relaxed_accum = 0u;
     state->elapsed_ms_accum = 0.0;
     state->last_build_ms = 0.0f;
@@ -174,6 +176,7 @@ void path_sched_set_goal_data(PathGoal goal,
                               const HexWorld *world,
                               const int32_t *neighbors,
                               const TileId *goals,
+                              const float *goal_seed_costs,
                               size_t goal_count,
                               size_t tile_count) {
     PathSchedGoalState *state = get_goal_state(goal);
@@ -188,6 +191,7 @@ void path_sched_set_goal_data(PathGoal goal,
     state->goals = goals;
     state->goal_count = goal_count;
     state->tile_count = tile_count;
+    state->goal_seed_costs = goal_seed_costs;
     state->has_data = (world && neighbors && goals && goal_count > 0u && tile_count > 0u);
     state->building = false;
     state->pending_force = false;
@@ -293,6 +297,7 @@ bool path_sched_update(float dt_sec, bool out_field_swapped[PATH_GOAL_COUNT]) {
                                             state->neighbors,
                                             state->goals,
                                             state->goal_count,
+                                            state->goal_seed_costs,
                                             path_cost_eff_costs(),
                                             dirty_ptr,
                                             dirty_count)) {

@@ -1,6 +1,7 @@
 #include "path/path_fields.h"
 
 #include <float.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -28,6 +29,7 @@ typedef struct PathFieldBuildState {
     const int32_t *neighbors;
     const TileId *goals;
     size_t goal_count;
+    const float *goal_seed_costs;
     const float *eff_cost;
     const TileId *dirty_tiles;
     size_t dirty_count;
@@ -199,6 +201,7 @@ bool path_fields_init_storage(size_t tile_count) {
         goal_state->build.neighbors = NULL;
         goal_state->build.goals = NULL;
         goal_state->build.goal_count = 0u;
+        goal_state->build.goal_seed_costs = NULL;
         goal_state->build.eff_cost = NULL;
         goal_state->build.dirty_tiles = NULL;
         goal_state->build.dirty_count = 0u;
@@ -229,6 +232,7 @@ void path_fields_shutdown_storage(void) {
         goal_state->build.neighbors = NULL;
         goal_state->build.goals = NULL;
         goal_state->build.goal_count = 0u;
+        goal_state->build.goal_seed_costs = NULL;
         goal_state->build.eff_cost = NULL;
         goal_state->build.dirty_tiles = NULL;
         goal_state->build.dirty_count = 0u;
@@ -244,6 +248,7 @@ bool path_fields_start_build(PathGoal goal,
                              const int32_t *neighbors,
                              const TileId *goals,
                              size_t goal_count,
+                             const float *goal_seed_costs,
                              const float *eff_cost,
                              const TileId *dirty_tiles,
                              size_t dirty_count) {
@@ -264,6 +269,7 @@ bool path_fields_start_build(PathGoal goal,
     build->neighbors = neighbors;
     build->goals = goals;
     build->goal_count = goal_count;
+    build->goal_seed_costs = goal_seed_costs;
     build->eff_cost = eff_cost;
     build->dirty_tiles = dirty_tiles;
     build->dirty_count = dirty_count;
@@ -289,9 +295,16 @@ bool path_fields_start_build(PathGoal goal,
         if ((size_t)goal_id >= tile_count) {
             continue;
         }
-        build->dist[goal_id] = 0.0f;
+        float seed = 0.0f;
+        if (goal_seed_costs && i < goal_count) {
+            seed = goal_seed_costs[i];
+            if (!isfinite(seed) || seed < 0.0f) {
+                seed = 0.0f;
+            }
+        }
+        build->dist[goal_id] = seed;
         build->next[goal_id] = 255u;
-        if (!heap_push(&build->heap, goal_id, 0.0f)) {
+        if (!heap_push(&build->heap, goal_id, seed)) {
             LOG_ERROR("path: failed to seed heap for goal %d", (int)goal);
             heap_clear(&build->heap);
             return false;
@@ -465,6 +478,7 @@ void path_fields_cancel_build(PathGoal goal) {
     build->dist = NULL;
     build->next = NULL;
     build->eff_cost = NULL;
+    build->goal_seed_costs = NULL;
     build->dirty_tiles = NULL;
     build->dirty_count = 0u;
     heap_clear(&build->heap);

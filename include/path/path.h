@@ -12,6 +12,7 @@
 typedef enum PathGoal {
     PATH_GOAL_ENTRANCE = 0,
     PATH_GOAL_UNLOAD = 1,
+    PATH_GOAL_FLOWERS_NEAR = 2,
     PATH_GOAL_COUNT
 } PathGoal;
 

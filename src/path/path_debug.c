@@ -65,20 +65,20 @@ static bool ensure_frame_capacity(size_t line_capacity) {
 bool path_debug_build_overlay(const HexWorld *world,
                               PathGoal goal,
                               const uint8_t *next,
-                              size_t tile_count) {
+                              size_t tile_count,
+                              uint32_t color_rgba) {
     if (!g_debug_initialized) {
         if (!path_debug_init()) {
             return false;
         }
     }
-    if (!world || !next || goal != PATH_GOAL_ENTRANCE) {
-        g_overlay_line_count = 0;
+    (void)goal;
+    if (!world || !next || tile_count == 0u) {
         return false;
     }
     const float *centers = hex_world_centers_xy(world);
     float cell_radius = hex_world_cell_radius(world);
     if (!centers || cell_radius <= 0.0f) {
-        g_overlay_line_count = 0;
         return false;
     }
 
@@ -90,26 +90,27 @@ bool path_debug_build_overlay(const HexWorld *world,
     }
 
     if (arrow_count == 0) {
-        g_overlay_line_count = 0;
         return true;
     }
 
-    float *new_xy = (float *)realloc(g_overlay_lines_xy, arrow_count * 4u * sizeof(float));
-    uint32_t *new_rgba = (uint32_t *)realloc(g_overlay_line_rgba, arrow_count * sizeof(uint32_t));
-    if (!new_xy || !new_rgba) {
-        free(new_xy);
-        free(new_rgba);
-        LOG_WARN("path_debug: failed to allocate overlay buffer (%zu arrows)", arrow_count);
-        g_overlay_line_count = 0;
+    size_t current = g_overlay_line_count;
+    size_t total = current + arrow_count;
+    float *new_xy = (float *)realloc(g_overlay_lines_xy, total * 4u * sizeof(float));
+    if (!new_xy) {
+        LOG_WARN("path_debug: failed to grow overlay XY buffer (%zu arrows)", total);
+        return false;
+    }
+    uint32_t *new_rgba = (uint32_t *)realloc(g_overlay_line_rgba, total * sizeof(uint32_t));
+    if (!new_rgba) {
+        LOG_WARN("path_debug: failed to grow overlay color buffer (%zu arrows)", total);
         return false;
     }
     g_overlay_lines_xy = new_xy;
     g_overlay_line_rgba = new_rgba;
 
-    const uint32_t arrow_color = 0x33FF66FFu;
     const float arrow_scale = cell_radius * 0.6f;
 
-    size_t arrow_index = 0;
+    size_t arrow_index = current;
     for (size_t i = 0; i < tile_count; ++i) {
         uint8_t dir = next[i];
         if (dir >= 6u) {
@@ -127,7 +128,7 @@ bool path_debug_build_overlay(const HexWorld *world,
         g_overlay_lines_xy[base + 1u] = cy;
         g_overlay_lines_xy[base + 2u] = ex;
         g_overlay_lines_xy[base + 3u] = ey;
-        g_overlay_line_rgba[arrow_index] = arrow_color;
+        g_overlay_line_rgba[arrow_index] = color_rgba;
         ++arrow_index;
     }
 
