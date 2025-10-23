@@ -6,17 +6,11 @@
 #include <stdint.h>
 
 #include "params.h"
+#include "tile_core.h"
 
-typedef enum HexTerrain {
-    HEX_TERRAIN_OPEN = 0,
-    HEX_TERRAIN_FOREST = 1,
-    HEX_TERRAIN_MOUNTAIN = 2,
-    HEX_TERRAIN_WATER = 3,
-    HEX_TERRAIN_HIVE = 4,
-    HEX_TERRAIN_FLOWERS = 5,
-    HEX_TERRAIN_ENTRANCE = 6,
-    HEX_TERRAIN_COUNT
-} HexTerrain;
+typedef TileTerrain HexTerrain;
+
+struct FlowerSystem;
 
 typedef struct HexTile {
     HexTerrain terrain;
@@ -28,6 +22,7 @@ typedef struct HexTile {
     float flower_viscosity;
     int16_t patch_id;
     float flow_capacity;
+    uint16_t flower_archetype_id;
 } HexTile;
 
 typedef struct HexTileDebugInfo {
@@ -43,6 +38,8 @@ typedef struct HexTileDebugInfo {
     float flower_quality;
     float flower_viscosity;
     float flow_capacity;
+    uint16_t flower_archetype_id;
+    const char *flower_archetype_name;
 } HexTileDebugInfo;
 
 typedef struct HexWorld {
@@ -62,6 +59,8 @@ typedef struct HexWorld {
     float *centers_world_xy;
     uint32_t *fill_rgba;
     uint32_t palette[HEX_TERRAIN_COUNT];
+    TileRegistry tile_registry;
+    struct FlowerSystem *flower_system;
 } HexWorld;
 
 bool hex_world_init(HexWorld *world, const Params *params);

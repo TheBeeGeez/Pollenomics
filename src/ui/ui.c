@@ -861,6 +861,13 @@ static void ui_draw_selected_hex_panel(void) {
     HEX_ADD_LINE(line, text_color, 18.0f);
 
     if (info->terrain == HEX_TERRAIN_FLOWERS) {
+        if (info->flower_archetype_name && info->flower_archetype_name[0] != '\0') {
+            snprintf(line, sizeof(line), "ARCHETYPE %s", info->flower_archetype_name);
+            HEX_ADD_LINE(line, accent, 18.0f);
+        } else {
+            snprintf(line, sizeof(line), "ARCHETYPE #%u", (unsigned int)info->flower_archetype_id);
+            HEX_ADD_LINE(line, accent, 18.0f);
+        }
         snprintf(line, sizeof(line), "NECTAR %.1F / %.1F UL", info->nectar_stock, info->nectar_capacity);
         HEX_ADD_LINE(line, text_color, 18.0f);
 

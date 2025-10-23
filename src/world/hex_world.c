@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "util/log.h"
+#include "world/tiles/tile_flower.h"
 #include <corecrt_math_defines.h>
 
 static uint32_t make_color_rgba(float r, float g, float b, float a) {
@@ -26,21 +27,6 @@ static uint32_t make_color_rgba(float r, float g, float b, float a) {
     if (bi > 255U) bi = 255U;
     if (ai > 255U) ai = 255U;
     return (ri << 24) | (gi << 16) | (bi << 8) | ai;
-}
-
-static uint32_t modulate_color(uint32_t rgba, float multiplier) {
-    if (multiplier < 0.0f) {
-        multiplier = 0.0f;
-    }
-    const float inv255 = 1.0f / 255.0f;
-    float r = ((float)((rgba >> 24) & 0xFFu)) * inv255;
-    float g = ((float)((rgba >> 16) & 0xFFu)) * inv255;
-    float b = ((float)((rgba >> 8) & 0xFFu)) * inv255;
-    float a = ((float)(rgba & 0xFFu)) * inv255;
-    r *= multiplier;
-    g *= multiplier;
-    b *= multiplier;
-    return make_color_rgba(r, g, b, a);
 }
 
 static void hex_world_setup_palette(HexWorld *world) {
@@ -77,6 +63,7 @@ static void assign_tile_properties(HexTile *tile, HexTerrain terrain) {
     tile->flower_viscosity = 1.0f;
     tile->patch_id = -1;
     tile->flow_capacity = 10.0f;
+    tile->flower_archetype_id = 0;
 
     switch (terrain) {
         case HEX_TERRAIN_FOREST:
@@ -151,6 +138,21 @@ static bool hex_world_build(HexWorld *world, const Params *params) {
 
     memset(centers, 0, center_bytes);
 
+    if (!world->flower_system) {
+        world->flower_system = (FlowerSystem *)malloc(sizeof(FlowerSystem));
+        if (!world->flower_system) {
+            free(tiles);
+            free(centers);
+            free(colors);
+            LOG_ERROR("hex: failed to allocate flower system");
+            return false;
+        }
+        tile_flower_system_init(world->flower_system);
+    }
+
+    tile_registry_init(&world->tile_registry);
+    tile_flower_register(&world->tile_registry, world->flower_system);
+
     world->origin_x = params->hex.origin_x;
     world->origin_y = params->hex.origin_y;
     world->cell_radius = radius;
@@ -168,6 +170,12 @@ static bool hex_world_build(HexWorld *world, const Params *params) {
     world->fill_rgba = colors;
 
     hex_world_setup_palette(world);
+
+    const TileTypeRegistration *flower_entry =
+        tile_registry_get(&world->tile_registry, HEX_TERRAIN_FLOWERS);
+    if (flower_entry && flower_entry->vtable && flower_entry->vtable->on_world_reset) {
+        flower_entry->vtable->on_world_reset(flower_entry->user_data, world, tile_count);
+    }
 
     bool hive_enabled = params->hive.rect_w > 0.0f && params->hive.rect_h > 0.0f;
     float hive_left = params->hive.rect_x;
@@ -244,10 +252,21 @@ static bool hex_world_build(HexWorld *world, const Params *params) {
             }
 
             assign_tile_properties(tile, terrain);
-            colors[index] = world->palette[tile->terrain];
+            if (terrain == HEX_TERRAIN_FLOWERS && flower_entry && flower_entry->vtable &&
+                flower_entry->vtable->generate_tile) {
+                uint64_t seed = ((uint64_t)(uint32_t)q << 32) ^ (uint64_t)(uint32_t)r;
+                flower_entry->vtable->generate_tile(flower_entry->user_data, world, index, q, r, seed);
+            }
+            uint32_t base_color = world->palette[tile->terrain];
+            if (tile->terrain == HEX_TERRAIN_FLOWERS && world->flower_system) {
+                base_color = tile_flower_color(world->flower_system, index, base_color);
+            }
+            colors[index] = base_color;
             ++index;
         }
     }
+
+    hex_world_apply_palette(world, false);
 
     LOG_INFO("hex: built grid %d x %d (%zu tiles) radius=%.1f", width, height, tile_count, radius);
     return true;
@@ -285,6 +304,11 @@ bool hex_world_rebuild(HexWorld *world, const Params *params) {
 void hex_world_shutdown(HexWorld *world) {
     if (!world) {
         return;
+    }
+    if (world->flower_system) {
+        tile_flower_system_shutdown(world->flower_system);
+        free(world->flower_system);
+        world->flower_system = NULL;
     }
     free(world->tiles);
     free(world->centers_world_xy);
@@ -361,6 +385,11 @@ bool hex_world_tile_debug_info(const HexWorld *world, size_t index, HexTileDebug
     out_info->flower_quality = tile->flower_quality;
     out_info->flower_viscosity = tile->flower_viscosity;
     out_info->flow_capacity = tile->flow_capacity;
+    out_info->flower_archetype_id = tile->flower_archetype_id;
+    out_info->flower_archetype_name = NULL;
+    if (tile->terrain == HEX_TERRAIN_FLOWERS && world->flower_system) {
+        out_info->flower_archetype_name = tile_flower_archetype_name(world->flower_system, index);
+    }
     return true;
 }
 
@@ -485,6 +514,10 @@ bool hex_world_tile_is_floral(const HexWorld *world, size_t index) {
         return false;
     }
     const HexTile *tile = &world->tiles[index];
+    const TileTypeRegistration *entry = tile_registry_get(&world->tile_registry, tile->terrain);
+    if (entry && entry->vtable && entry->vtable->is_floral) {
+        return entry->vtable->is_floral(entry->user_data, index);
+    }
     return tile->terrain == HEX_TERRAIN_FLOWERS && tile->nectar_capacity > 0.0f;
 }
 
@@ -512,7 +545,19 @@ float hex_world_tile_harvest(HexWorld *world, size_t index, float request_uL, fl
         viscosity_scale = 0.05f;
     }
 
-    float harvest = request_uL * viscosity_scale;
+    float effective_request = request_uL * viscosity_scale;
+
+    const TileTypeRegistration *entry = tile_registry_get(&world->tile_registry, tile->terrain);
+    if (entry && entry->vtable && entry->vtable->harvest) {
+        float harvested = entry->vtable->harvest(entry->user_data, world, index, effective_request, quality_out);
+        tile = &world->tiles[index];
+        if (quality_out && *quality_out <= 0.0f) {
+            *quality_out = tile->flower_quality;
+        }
+        return harvested;
+    }
+
+    float harvest = effective_request;
     if (harvest > tile->nectar_stock) {
         harvest = tile->nectar_stock;
     }
@@ -526,6 +571,17 @@ float hex_world_tile_harvest(HexWorld *world, size_t index, float request_uL, fl
     tile->nectar_stock -= harvest;
     if (tile->nectar_stock < 0.0f) {
         tile->nectar_stock = 0.0f;
+    }
+    if (world->flower_system) {
+        tile_flower_override_payload(world->flower_system,
+                                     world,
+                                     index,
+                                     tile->nectar_capacity,
+                                     tile->nectar_stock,
+                                     tile->nectar_recharge_rate,
+                                     tile->nectar_recharge_multiplier,
+                                     tile->flower_quality,
+                                     tile->flower_viscosity);
     }
     if (quality_out) {
         *quality_out = tile->flower_quality;
@@ -563,6 +619,17 @@ void hex_world_tile_set_floral(HexWorld *world,
     tile->flower_viscosity = viscosity;
     tile->nectar_recharge_multiplier = 1.0f;
     tile->patch_id = -1;
+    if (world->flower_system) {
+        tile_flower_override_payload(world->flower_system,
+                                     world,
+                                     index,
+                                     tile->nectar_capacity,
+                                     tile->nectar_stock,
+                                     tile->nectar_recharge_rate,
+                                     tile->nectar_recharge_multiplier,
+                                     tile->flower_quality,
+                                     tile->flower_viscosity);
+    }
 }
 
 void hex_world_apply_palette(HexWorld *world, bool nectar_heatmap_enabled) {
@@ -571,19 +638,12 @@ void hex_world_apply_palette(HexWorld *world, bool nectar_heatmap_enabled) {
     }
     for (size_t i = 0; i < world->tile_count; ++i) {
         const HexTile *tile = &world->tiles[i];
-        uint32_t base = world->palette[tile->terrain];
-        if (nectar_heatmap_enabled && tile->terrain == HEX_TERRAIN_FLOWERS && tile->nectar_capacity > 0.0f) {
-            float ratio = tile->nectar_stock / tile->nectar_capacity;
-            if (ratio < 0.0f) {
-                ratio = 0.0f;
-            }
-            if (ratio > 1.0f) {
-                ratio = 1.0f;
-            }
-            float brightness = 0.25f + 0.75f * ratio;
-            world->fill_rgba[i] = modulate_color(base, brightness);
-        } else {
-            world->fill_rgba[i] = base;
+        world->fill_rgba[i] = world->palette[tile->terrain];
+    }
+    for (int terrain = 0; terrain < HEX_TERRAIN_COUNT; ++terrain) {
+        const TileTypeRegistration *entry = tile_registry_get(&world->tile_registry, (HexTerrain)terrain);
+        if (entry && entry->vtable && entry->vtable->apply_palette) {
+            entry->vtable->apply_palette(entry->user_data, world, nectar_heatmap_enabled);
         }
     }
 }

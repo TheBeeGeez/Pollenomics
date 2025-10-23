@@ -14,6 +14,7 @@
 #include "sim_internal.h"
 #include "bee_path.h"
 #include "hive.h"
+#include "world/tiles/tile_flower.h"
 
 static void *alloc_aligned(size_t bytes) {
     if (bytes == 0) {
@@ -278,6 +279,17 @@ static void sim_tiles_recharge(SimState *state, float dt_sec) {
         }
         if (tile->nectar_stock < 0.0f) {
             tile->nectar_stock = 0.0f;
+        }
+        if (world->flower_system) {
+            tile_flower_override_payload(world->flower_system,
+                                         world,
+                                         tile_index,
+                                         tile->nectar_capacity,
+                                         tile->nectar_stock,
+                                         tile->nectar_recharge_rate,
+                                         tile->nectar_recharge_multiplier,
+                                         tile->flower_quality,
+                                         tile->flower_viscosity);
         }
     }
 }

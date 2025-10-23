@@ -15,6 +15,8 @@ add_executable(bee_sim
   src/sim/hive.c
   src/sim/sim.c
   src/world/hex_world.c
+  src/world/tiles/tile_core.c
+  src/world/tiles/flower/tile_flower.c
   src/platform/sdl_io.c
   src/render/gl_backend.c
   src/ui/ui.c
