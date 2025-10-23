@@ -552,7 +552,7 @@ static void render_draw_hexes(RenderState *state,
     glUniform2f(state->hex_u_cam_center, cam_center_x, cam_center_y);
     glUniform1f(state->hex_u_cam_zoom, zoom);
     glBindVertexArray(state->hex_vao);
-    glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 7, (GLsizei)hex->count);
+    glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 8, (GLsizei)hex->count);
     glBindVertexArray(0);
     glUseProgram(0);
 }
@@ -627,7 +627,7 @@ bool render_init(Render *render, const Params *params) {
 
     glBindVertexArray(state->hex_vao);
     glBindBuffer(GL_ARRAY_BUFFER, state->hex_vertex_vbo);
-    float hex_vertices[14];
+    float hex_vertices[16];
     hex_vertices[0] = 0.0f;
     hex_vertices[1] = 0.0f;
     const float deg_to_rad = 0.01745329251994329577f;
@@ -637,6 +637,8 @@ bool render_init(Render *render, const Params *params) {
         hex_vertices[2 * (i + 1) + 0] = cosf(angle_rad);
         hex_vertices[2 * (i + 1) + 1] = sinf(angle_rad);
     }
+    hex_vertices[14] = hex_vertices[2];
+    hex_vertices[15] = hex_vertices[3];
     glBufferData(GL_ARRAY_BUFFER, sizeof(hex_vertices), hex_vertices, GL_STATIC_DRAW);
 
     glBindBuffer(GL_ARRAY_BUFFER, state->hex_instance_vbo);
