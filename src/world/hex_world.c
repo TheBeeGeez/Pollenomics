@@ -1015,33 +1015,11 @@ float hex_world_hive_deposit_world(HexWorld *world, float world_x, float world_y
     if (!world || !world->hive_system || !world->hive_system->enabled || request_uL <= 0.0f) {
         return 0.0f;
     }
-    float remaining = request_uL;
-    float deposited = 0.0f;
     size_t primary_index = (size_t)SIZE_MAX;
-    if (hex_world_tile_from_world(world, world_x, world_y, &primary_index)) {
-        float accepted = hex_world_hive_deposit_at_tile(world, primary_index, remaining);
-        deposited += accepted;
-        remaining -= accepted;
+    if (!hex_world_tile_from_world(world, world_x, world_y, &primary_index)) {
+        return 0.0f;
     }
-    if (remaining <= 0.0f) {
-        return deposited;
-    }
-    HiveSystem *hive = world->hive_system;
-    if (!hive || !hive->storage_tiles) {
-        return deposited;
-    }
-    for (size_t i = 0; i < hive->storage_tile_count && remaining > 0.0f; ++i) {
-        size_t tile_index = hive->storage_tiles[i].tile_index;
-        if (tile_index == primary_index) {
-            continue;
-        }
-        float accepted = hex_world_hive_deposit_at_tile(world, tile_index, remaining);
-        if (accepted > 0.0f) {
-            deposited += accepted;
-            remaining -= accepted;
-        }
-    }
-    return deposited;
+    return hex_world_hive_deposit_at_tile(world, primary_index, request_uL);
 }
 
 float hex_world_hive_total_honey(const HexWorld *world) {
