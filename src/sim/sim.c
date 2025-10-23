@@ -880,7 +880,9 @@ void sim_tick(SimState *state, float dt_sec) {
         dy = target_y - y;
         float dist_sq = dx * dx + dy * dy;
         float distance = sqrtf(dist_sq);
-        bool flight_mode = (mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING);
+        bool unloading_needs_move = (mode == BEE_MODE_UNLOADING && distance > current_arrive_tol);
+        bool flight_mode = (mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING ||
+                            unloading_needs_move);
 
         uint8_t path_valid = 0u;
         uint8_t path_has_waypoint = 0u;
