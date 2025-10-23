@@ -13,7 +13,6 @@
 
 #include "sim_internal.h"
 #include "bee_path.h"
-#include "hive.h"
 #include "world/tiles/tile_flower.h"
 
 static void *alloc_aligned(size_t bytes) {
@@ -145,6 +144,37 @@ static void sim_tile_center(const SimState *state, size_t index, float *out_x, f
     if (out_y) {
         *out_y = centers[index * 2 + 1];
     }
+}
+
+static bool sim_hive_exists(const SimState *state) {
+    return state && state->hex_world && hex_world_hive_enabled(state->hex_world);
+}
+
+static bool sim_point_inside_hive(const SimState *state, float x, float y) {
+    if (!sim_hive_exists(state)) {
+        return false;
+    }
+    size_t index = (size_t)SIZE_MAX;
+    if (!hex_world_tile_from_world(state->hex_world, x, y, &index)) {
+        return false;
+    }
+    if (index >= state->hex_world->tile_count) {
+        return false;
+    }
+    HexTerrain terrain = state->hex_world->tiles[index].terrain;
+    return (terrain == HEX_TERRAIN_HIVE_INTERIOR || terrain == HEX_TERRAIN_HIVE_STORAGE ||
+            terrain == HEX_TERRAIN_HIVE_ENTRANCE);
+}
+
+static bool sim_tile_passable_world(const SimState *state, float x, float y) {
+    if (!state || !state->hex_world) {
+        return true;
+    }
+    size_t index = (size_t)SIZE_MAX;
+    if (!hex_world_tile_from_world(state->hex_world, x, y, &index)) {
+        return true;
+    }
+    return hex_world_tile_passable(state->hex_world, index);
 }
 
 static bool sim_any_floral_available(const SimState *state) {
@@ -364,17 +394,6 @@ static void configure_from_params(SimState *state, const Params *params) {
     state->spawn_speed_std = params->motion_spawn_speed_std;
     state->spawn_mode = params->motion_spawn_mode;
     state->seed = params->rng_seed;
-    state->hive_rect_x = params->hive.rect_x;
-    state->hive_rect_y = params->hive.rect_y;
-    state->hive_rect_w = params->hive.rect_w;
-    state->hive_rect_h = params->hive.rect_h;
-    state->hive_entrance_side = params->hive.entrance_side;
-    state->hive_entrance_t = params->hive.entrance_t;
-    state->hive_entrance_width = params->hive.entrance_width;
-    state->hive_restitution = params->hive.restitution;
-    state->hive_tangent_damp = params->hive.tangent_damp;
-    state->hive_max_iters = params->hive.max_resolve_iters;
-    state->hive_safety_margin = params->hive.safety_margin;
     state->bee_capacity_uL = params->bee.capacity_uL;
     state->bee_harvest_rate_uLps = params->bee.harvest_rate_uLps;
     state->bee_unload_rate_uLps = params->bee.unload_rate_uLps;
@@ -382,7 +401,6 @@ static void configure_from_params(SimState *state, const Params *params) {
     state->bee_speed_mps = params->bee.speed_mps;
     state->bee_seek_accel = params->bee.seek_accel;
     state->bee_arrive_tol_world = params->bee.arrive_tol_world;
-    hive_build_segments(state);
 
     if (state->capacity_uL && state->harvest_rate_uLps) {
         for (size_t i = 0; i < state->count; ++i) {
@@ -423,7 +441,24 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
     float entrance_y = state->world_h * 0.5f;
     float unload_x = entrance_x;
     float unload_y = entrance_y;
-    hive_compute_points(state, &entrance_x, &entrance_y, &unload_x, &unload_y);
+    float hive_center_x = entrance_x;
+    float hive_center_y = entrance_y;
+    if (state->hex_world) {
+        if (hex_world_hive_center(state->hex_world, &hive_center_x, &hive_center_y)) {
+            entrance_x = hive_center_x;
+            entrance_y = hive_center_y;
+            unload_x = hive_center_x;
+            unload_y = hive_center_y;
+        }
+        if (!hex_world_hive_preferred_entrance(state->hex_world, &entrance_x, &entrance_y)) {
+            entrance_x = hive_center_x;
+            entrance_y = hive_center_y;
+        }
+        if (!hex_world_hive_preferred_unload(state->hex_world, &unload_x, &unload_y)) {
+            unload_x = hive_center_x;
+            unload_y = hive_center_y;
+        }
+    }
 
     const float bee_radius = state->default_radius;
     const float spacing = clamp_positive(bee_radius * 3.0f, bee_radius * 1.5f);
@@ -458,7 +493,7 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
         float x = base_x + jitter_x;
         float y = base_y + jitter_y;
 
-        if (i == 0 && state->hive_enabled) {
+        if (i == 0 && sim_hive_exists(state)) {
             x = unload_x;
             y = unload_y;
         }
@@ -510,15 +545,8 @@ static void fill_bees(SimState *state, const Params *params, uint64_t seed) {
         state->intent[i] = (uint8_t)BEE_INTENT_REST;
         state->color_rgba[i] = bee_color_for(state->role[i], state->mode[i]);
 
-        bool inside = state->hive_enabled &&
-                      x >= state->hive_rect_x &&
-                      x <= state->hive_rect_x + state->hive_rect_w &&
-                      y >= state->hive_rect_y &&
-                      y <= state->hive_rect_y + state->hive_rect_h;
+        bool inside = sim_point_inside_hive(state, x, y);
         state->inside_hive_flag[i] = inside ? 1u : 0u;
-        if (i == 0 && state->hive_enabled) {
-            state->inside_hive_flag[i] = 1u;
-        }
         if (state->path_valid) {
             state->path_valid[i] = 0u;
         }
@@ -697,7 +725,24 @@ void sim_tick(SimState *state, float dt_sec) {
     float entrance_y = world_h * 0.5f;
     float unload_x = entrance_x;
     float unload_y = entrance_y;
-    hive_compute_points(state, &entrance_x, &entrance_y, &unload_x, &unload_y);
+    float hive_center_x = entrance_x;
+    float hive_center_y = entrance_y;
+    if (state->hex_world) {
+        if (hex_world_hive_center(state->hex_world, &hive_center_x, &hive_center_y)) {
+            entrance_x = hive_center_x;
+            entrance_y = hive_center_y;
+            unload_x = hive_center_x;
+            unload_y = hive_center_y;
+        }
+        if (!hex_world_hive_preferred_entrance(state->hex_world, &entrance_x, &entrance_y)) {
+            entrance_x = hive_center_x;
+            entrance_y = hive_center_y;
+        }
+        if (!hex_world_hive_preferred_unload(state->hex_world, &unload_x, &unload_y)) {
+            unload_x = hive_center_x;
+            unload_y = hive_center_y;
+        }
+    }
 
     double speed_sum = 0.0;
     float speed_min_tick = FLT_MAX;
@@ -732,11 +777,7 @@ void sim_tick(SimState *state, float dt_sec) {
         if (target_tile) {
             sim_tile_center(state, (size_t)target_id, &tile_center_x, &tile_center_y);
         }
-        bool inside_hive_now = state->hive_enabled &&
-                               x >= state->hive_rect_x &&
-                               x <= state->hive_rect_x + state->hive_rect_w &&
-                               y >= state->hive_rect_y &&
-                               y <= state->hive_rect_y + state->hive_rect_h;
+        bool inside_hive_now = sim_point_inside_hive(state, x, y);
 
         float current_arrive_tol = arrive_tol;
         if (target_tile && (prev_mode == BEE_MODE_OUTBOUND || prev_mode == BEE_MODE_FORAGING ||
@@ -763,8 +804,8 @@ void sim_tick(SimState *state, float dt_sec) {
             .patch_quality = target_tile ? target_tile->flower_quality : 0.0f,
             .state_time = prev_t_state,
             .dt_sec = dt_sec,
-            .hive_center_x = state->hive_rect_w > 0.0f ? state->hive_rect_x + state->hive_rect_w * 0.5f : world_w * 0.5f,
-            .hive_center_y = state->hive_rect_h > 0.0f ? state->hive_rect_y + state->hive_rect_h * 0.5f : world_h * 0.5f,
+            .hive_center_x = hive_center_x,
+            .hive_center_y = hive_center_y,
             .entrance_x = entrance_x,
             .entrance_y = entrance_y,
             .unload_x = unload_x,
@@ -839,7 +880,9 @@ void sim_tick(SimState *state, float dt_sec) {
         dy = target_y - y;
         float dist_sq = dx * dx + dy * dy;
         float distance = sqrtf(dist_sq);
-        bool flight_mode = (mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING);
+        bool unloading_needs_move = (mode == BEE_MODE_UNLOADING && distance > current_arrive_tol);
+        bool flight_mode = (mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING ||
+                            unloading_needs_move);
 
         uint8_t path_valid = 0u;
         uint8_t path_has_waypoint = 0u;
@@ -945,14 +988,15 @@ void sim_tick(SimState *state, float dt_sec) {
             ++bounce_counter;
         }
 
-        hive_resolve_disc(state, radius, &new_x, &new_y, &vx, &vy);
+        if (!sim_tile_passable_world(state, new_x, new_y)) {
+            new_x = x;
+            new_y = y;
+            vx = 0.0f;
+            vy = 0.0f;
+        }
 
         float speed_after = sqrtf(vx * vx + vy * vy);
-        bool inside_after = state->hive_enabled &&
-                            new_x >= state->hive_rect_x &&
-                            new_x <= state->hive_rect_x + state->hive_rect_w &&
-                            new_y >= state->hive_rect_y &&
-                            new_y <= state->hive_rect_y + state->hive_rect_h;
+        bool inside_after = sim_point_inside_hive(state, new_x, new_y);
 
         if (inside_after && !inside_hive_now && (mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING)) {
             mode = BEE_MODE_ENTERING;
@@ -996,9 +1040,18 @@ void sim_tick(SimState *state, float dt_sec) {
                 }
             }
         } else if (mode == BEE_MODE_UNLOADING) {
-            float unload = state->bee_unload_rate_uLps * dt_sec;
-            if (unload > load) unload = load;
-            load -= unload;
+            float unload_request = state->bee_unload_rate_uLps * dt_sec;
+            if (unload_request > load) unload_request = load;
+            if (unload_request > 0.0f) {
+                float deposited = hex_world_hive_deposit_world(state->hex_world, new_x, new_y, unload_request);
+                if (deposited > unload_request) {
+                    deposited = unload_request;
+                }
+                if (deposited < 0.0f) {
+                    deposited = 0.0f;
+                }
+                load -= deposited;
+            }
         }
 
         if (energy < 0.0f) energy = 0.0f;
@@ -1143,17 +1196,6 @@ void sim_apply_runtime_params(SimState *state, const Params *params) {
     }
     state->spawn_mode = params->motion_spawn_mode;
 
-    state->hive_rect_x = params->hive.rect_x;
-    state->hive_rect_y = params->hive.rect_y;
-    state->hive_rect_w = params->hive.rect_w;
-    state->hive_rect_h = params->hive.rect_h;
-    state->hive_entrance_side = params->hive.entrance_side;
-    state->hive_entrance_t = params->hive.entrance_t;
-    state->hive_entrance_width = params->hive.entrance_width;
-    state->hive_restitution = params->hive.restitution;
-    state->hive_tangent_damp = params->hive.tangent_damp;
-    state->hive_max_iters = params->hive.max_resolve_iters;
-    state->hive_safety_margin = params->hive.safety_margin;
     state->bee_capacity_uL = params->bee.capacity_uL;
     state->bee_harvest_rate_uLps = params->bee.harvest_rate_uLps;
     state->bee_unload_rate_uLps = params->bee.unload_rate_uLps;
@@ -1161,7 +1203,6 @@ void sim_apply_runtime_params(SimState *state, const Params *params) {
     state->bee_speed_mps = params->bee.speed_mps;
     state->bee_seek_accel = params->bee.seek_accel;
     state->bee_arrive_tol_world = params->bee.arrive_tol_world;
-    hive_build_segments(state);
 
     for (size_t i = 0; i < state->count; ++i) {
         state->capacity_uL[i] = state->bee_capacity_uL;
@@ -1314,14 +1355,7 @@ bool sim_get_bee_info(const SimState *state, size_t index, BeeDebugInfo *out_inf
         info.path_waypoint_y = info.path_final_y;
     }
 
-    bool inside_hive = false;
-    if (state->hive_enabled && state->hive_rect_w > 0.0f && state->hive_rect_h > 0.0f) {
-        inside_hive = (info.pos_x >= state->hive_rect_x &&
-                       info.pos_x <= state->hive_rect_x + state->hive_rect_w &&
-                       info.pos_y >= state->hive_rect_y &&
-                       info.pos_y <= state->hive_rect_y + state->hive_rect_h);
-    }
-    info.inside_hive = inside_hive;
+    info.inside_hive = sim_point_inside_hive(state, info.pos_x, info.pos_y);
 
     *out_info = info;
     return true;

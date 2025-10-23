@@ -38,17 +38,12 @@ typedef struct Params {
     uint64_t rng_seed;
 
     struct {
-        float rect_x;
-        float rect_y;
-        float rect_w;
-        float rect_h;
-        int entrance_side;       // 0=top,1=bottom,2=left,3=right
-        float entrance_t;        // normalized along side [0, 1]
-        float entrance_width;
-        float restitution;
-        float tangent_damp;
-        int max_resolve_iters;
-        float safety_margin;
+        float center_x;           // world-space hive center (px)
+        float center_y;
+        int radius_tiles;         // hex radius for the hive footprint (>= 0)
+        int storage_radius_tiles; // radius for interior storage patch (>= 0)
+        int entrance_dir;         // 0=N,1=NE,2=SE,3=S,4=SW,5=NW
+        int entrance_width_tiles; // number of contiguous entrance tiles (>= 1)
     } hive;
 
     struct {

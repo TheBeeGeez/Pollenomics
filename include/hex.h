@@ -11,6 +11,7 @@
 typedef TileTerrain HexTerrain;
 
 struct FlowerSystem;
+struct HiveSystem;
 
 typedef struct HexTile {
     HexTerrain terrain;
@@ -23,6 +24,12 @@ typedef struct HexTile {
     int16_t patch_id;
     float flow_capacity;
     uint16_t flower_archetype_id;
+    float hive_honey_stock;
+    float hive_honey_capacity;
+    float base_cost;
+    bool passable;
+    bool hive_deposit_enabled;
+    int16_t hive_storage_slot;
 } HexTile;
 
 typedef struct HexTileDebugInfo {
@@ -40,6 +47,13 @@ typedef struct HexTileDebugInfo {
     float flow_capacity;
     uint16_t flower_archetype_id;
     const char *flower_archetype_name;
+    float hive_honey_stock;
+    float hive_honey_capacity;
+    float hive_total_honey;
+    float hive_total_pollen;
+    float hive_base_cost;
+    bool hive_passable;
+    bool hive_allows_deposit;
 } HexTileDebugInfo;
 
 typedef struct HexWorld {
@@ -61,6 +75,7 @@ typedef struct HexWorld {
     uint32_t palette[HEX_TERRAIN_COUNT];
     TileRegistry tile_registry;
     struct FlowerSystem *flower_system;
+    struct HiveSystem *hive_system;
 } HexWorld;
 
 bool hex_world_init(HexWorld *world, const Params *params);
@@ -95,5 +110,17 @@ void hex_world_tile_set_floral(HexWorld *world,
                                float quality,
                                float viscosity);
 void hex_world_apply_palette(HexWorld *world, bool nectar_heatmap_enabled);
+
+bool hex_world_tile_passable(const HexWorld *world, size_t index);
+bool hex_world_tile_allows_deposit(const HexWorld *world, size_t index);
+float hex_world_hive_deposit_at_tile(HexWorld *world, size_t index, float request_uL);
+float hex_world_hive_deposit_world(HexWorld *world, float world_x, float world_y, float request_uL);
+float hex_world_hive_total_honey(const HexWorld *world);
+float hex_world_hive_total_pollen(const HexWorld *world);
+bool hex_world_hive_exists(const HexWorld *world);
+bool hex_world_hive_enabled(const HexWorld *world);
+bool hex_world_hive_center(const HexWorld *world, float *out_x, float *out_y);
+bool hex_world_hive_preferred_unload(const HexWorld *world, float *out_x, float *out_y);
+bool hex_world_hive_preferred_entrance(const HexWorld *world, float *out_x, float *out_y);
 
 #endif  // HEX_H

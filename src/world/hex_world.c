@@ -9,6 +9,45 @@
 #include "world/tiles/tile_flower.h"
 #include <corecrt_math_defines.h>
 
+typedef struct HiveStorageTilePayload {
+    size_t tile_index;
+    float stock_uL;
+    float capacity_uL;
+} HiveStorageTilePayload;
+
+typedef struct HiveEntranceCandidate {
+    size_t tile_index;
+    float dot_score;
+} HiveEntranceCandidate;
+
+typedef struct HiveSystem {
+    bool enabled;
+    float center_x;
+    float center_y;
+    int center_q;
+    int center_r;
+    int radius_tiles;
+    int storage_radius_tiles;
+    float honey_total_uL;
+    float pollen_total_uL;
+    HiveStorageTilePayload *storage_tiles;
+    size_t storage_tile_count;
+    size_t *entrance_tile_indices;
+    size_t entrance_tile_count;
+} HiveSystem;
+
+static void hive_system_free(HiveSystem *hive) {
+    if (!hive) {
+        return;
+    }
+    free(hive->storage_tiles);
+    free(hive->entrance_tile_indices);
+    free(hive);
+}
+
+static const int HIVE_DIR_Q[6] = {0, 1, 1, 0, -1, -1};
+static const int HIVE_DIR_R[6] = {-1, -1, 0, 1, 1, 0};
+
 static uint32_t make_color_rgba(float r, float g, float b, float a) {
     if (r < 0.0f) r = 0.0f;
     if (r > 1.0f) r = 1.0f;
@@ -37,9 +76,11 @@ static void hex_world_setup_palette(HexWorld *world) {
     world->palette[HEX_TERRAIN_FOREST] = make_color_rgba(0.26f, 0.58f, 0.32f, 0.68f);
     world->palette[HEX_TERRAIN_MOUNTAIN] = make_color_rgba(0.55f, 0.46f, 0.36f, 0.68f);
     world->palette[HEX_TERRAIN_WATER] = make_color_rgba(0.28f, 0.50f, 0.82f, 0.62f);
-    world->palette[HEX_TERRAIN_HIVE] = make_color_rgba(0.93f, 0.78f, 0.24f, 0.78f);
+    world->palette[HEX_TERRAIN_HIVE_INTERIOR] = make_color_rgba(0.93f, 0.85f, 0.58f, 0.78f);
+    world->palette[HEX_TERRAIN_HIVE_STORAGE] = make_color_rgba(0.98f, 0.74f, 0.18f, 0.82f);
+    world->palette[HEX_TERRAIN_HIVE_WALL] = make_color_rgba(0.36f, 0.22f, 0.10f, 0.92f);
+    world->palette[HEX_TERRAIN_HIVE_ENTRANCE] = make_color_rgba(0.18f, 0.78f, 0.82f, 0.88f);
     world->palette[HEX_TERRAIN_FLOWERS] = make_color_rgba(0.90f, 0.42f, 0.72f, 0.72f);
-    world->palette[HEX_TERRAIN_ENTRANCE] = make_color_rgba(0.20f, 0.85f, 0.82f, 0.80f);
 }
 
 static int terrain_pattern(int q, int r) {
@@ -48,6 +89,77 @@ static int terrain_pattern(int q, int r) {
         n = -n;
     }
     return n % 11;
+}
+
+static int hex_distance_axial(int q1, int r1, int q2, int r2) {
+    int dq = q1 - q2;
+    int dr = r1 - r2;
+    int ds = -dq - dr;
+    if (dq < 0) dq = -dq;
+    if (dr < 0) dr = -dr;
+    if (ds < 0) ds = -ds;
+    int max = dq;
+    if (dr > max) max = dr;
+    if (ds > max) max = ds;
+    return max;
+}
+
+static bool push_size_t(size_t **data, size_t *count, size_t *capacity, size_t value) {
+    if (!data || !count || !capacity) {
+        return false;
+    }
+    if (*count >= *capacity) {
+        size_t new_cap = (*capacity == 0) ? 16 : (*capacity * 2);
+        size_t *new_data = (size_t *)realloc(*data, new_cap * sizeof(size_t));
+        if (!new_data) {
+            return false;
+        }
+        *data = new_data;
+        *capacity = new_cap;
+    }
+    (*data)[*count] = value;
+    (*count)++;
+    return true;
+}
+
+static bool push_candidate(HiveEntranceCandidate **data,
+                           size_t *count,
+                           size_t *capacity,
+                           const HiveEntranceCandidate *value) {
+    if (!data || !count || !capacity || !value) {
+        return false;
+    }
+    if (*count >= *capacity) {
+        size_t new_cap = (*capacity == 0) ? 16 : (*capacity * 2);
+        HiveEntranceCandidate *new_data =
+            (HiveEntranceCandidate *)realloc(*data, new_cap * sizeof(HiveEntranceCandidate));
+        if (!new_data) {
+            return false;
+        }
+        *data = new_data;
+        *capacity = new_cap;
+    }
+    (*data)[*count] = *value;
+    (*count)++;
+    return true;
+}
+
+static int compare_candidate_desc(const void *lhs, const void *rhs) {
+    const HiveEntranceCandidate *a = (const HiveEntranceCandidate *)lhs;
+    const HiveEntranceCandidate *b = (const HiveEntranceCandidate *)rhs;
+    if (b->dot_score > a->dot_score) {
+        return 1;
+    }
+    if (b->dot_score < a->dot_score) {
+        return -1;
+    }
+    if (b->tile_index > a->tile_index) {
+        return 1;
+    }
+    if (b->tile_index < a->tile_index) {
+        return -1;
+    }
+    return 0;
 }
 
 static void assign_tile_properties(HexTile *tile, HexTerrain terrain) {
@@ -64,6 +176,12 @@ static void assign_tile_properties(HexTile *tile, HexTerrain terrain) {
     tile->patch_id = -1;
     tile->flow_capacity = 10.0f;
     tile->flower_archetype_id = 0;
+    tile->hive_honey_stock = 0.0f;
+    tile->hive_honey_capacity = 0.0f;
+    tile->base_cost = 1.0f;
+    tile->passable = true;
+    tile->hive_deposit_enabled = false;
+    tile->hive_storage_slot = -1;
 
     switch (terrain) {
         case HEX_TERRAIN_FOREST:
@@ -75,8 +193,23 @@ static void assign_tile_properties(HexTile *tile, HexTerrain terrain) {
         case HEX_TERRAIN_WATER:
             tile->flow_capacity = 1.0f;
             break;
-        case HEX_TERRAIN_HIVE:
-            tile->flow_capacity = 45.0f;
+        case HEX_TERRAIN_HIVE_INTERIOR:
+            tile->flow_capacity = 42.0f;
+            tile->base_cost = 1.0f;
+            break;
+        case HEX_TERRAIN_HIVE_STORAGE:
+            tile->flow_capacity = 40.0f;
+            tile->base_cost = 1.0f;
+            tile->hive_deposit_enabled = true;
+            break;
+        case HEX_TERRAIN_HIVE_WALL:
+            tile->flow_capacity = 0.0f;
+            tile->base_cost = 1e6f;
+            tile->passable = false;
+            break;
+        case HEX_TERRAIN_HIVE_ENTRANCE:
+            tile->flow_capacity = 60.0f;
+            tile->base_cost = 0.7f;
             break;
         case HEX_TERRAIN_FLOWERS:
             tile->nectar_capacity = 180.0f;
@@ -85,9 +218,6 @@ static void assign_tile_properties(HexTile *tile, HexTerrain terrain) {
             tile->flower_quality = 0.75f;
             tile->flower_viscosity = 1.0f;
             tile->flow_capacity = 18.0f;
-            break;
-        case HEX_TERRAIN_ENTRANCE:
-            tile->flow_capacity = 60.0f;
             break;
         case HEX_TERRAIN_OPEN:
         default:
@@ -177,29 +307,87 @@ static bool hex_world_build(HexWorld *world, const Params *params) {
         flower_entry->vtable->on_world_reset(flower_entry->user_data, world, tile_count);
     }
 
-    bool hive_enabled = params->hive.rect_w > 0.0f && params->hive.rect_h > 0.0f;
-    float hive_left = params->hive.rect_x;
-    float hive_top = params->hive.rect_y;
-    float hive_right = hive_left + params->hive.rect_w;
-    float hive_bottom = hive_top + params->hive.rect_h;
+    HiveSystem *hive = NULL;
+    HiveEntranceCandidate *entrance_candidates = NULL;
+    size_t entrance_candidate_count = 0;
+    size_t entrance_candidate_cap = 0;
+    size_t *storage_indices = NULL;
+    size_t storage_index_count = 0;
+    size_t storage_index_cap = 0;
 
-    bool entrance_horizontal = params->hive.entrance_side == 0 || params->hive.entrance_side == 1;
-    float entrance_axis = 0.0f;
-    float entrance_min = 0.0f;
-    float entrance_max = 0.0f;
-    if (hive_enabled) {
-        float half_gap = params->hive.entrance_width * 0.5f;
-        if (entrance_horizontal) {
-            float gap_center = hive_left + params->hive.entrance_t * params->hive.rect_w;
-            entrance_axis = (params->hive.entrance_side == 0) ? hive_top : hive_bottom;
-            entrance_min = fmaxf(hive_left, gap_center - half_gap);
-            entrance_max = fminf(hive_right, gap_center + half_gap);
-        } else {
-            float gap_center = hive_top + params->hive.entrance_t * params->hive.rect_h;
-            entrance_axis = (params->hive.entrance_side == 2) ? hive_left : hive_right;
-            entrance_min = fmaxf(hive_top, gap_center - half_gap);
-            entrance_max = fminf(hive_bottom, gap_center + half_gap);
+    bool hive_enabled = params->hive.radius_tiles > 0;
+    int hive_radius = params->hive.radius_tiles;
+    if (hive_radius < 0) {
+        hive_radius = 0;
+        hive_enabled = false;
+    }
+    int storage_radius = params->hive.storage_radius_tiles;
+    if (storage_radius < 0) {
+        storage_radius = 0;
+    }
+    if (hive_radius <= 0) {
+        storage_radius = 0;
+    } else if (storage_radius > hive_radius - 1) {
+        storage_radius = hive_radius - 1;
+        if (storage_radius < 0) {
+            storage_radius = 0;
         }
+    }
+
+    int entrance_dir = params->hive.entrance_dir;
+    if (entrance_dir < 0 || entrance_dir > 5) {
+        entrance_dir = 3;
+    }
+    int entrance_width = params->hive.entrance_width_tiles;
+    if (entrance_width <= 0) {
+        entrance_width = 1;
+    }
+
+    float hive_center_x = params->hive.center_x;
+    float hive_center_y = params->hive.center_y;
+    float entrance_target_x = hive_center_x;
+    float entrance_target_y = hive_center_y;
+    float entrance_target_vx = 0.0f;
+    float entrance_target_vy = 0.0f;
+    float entrance_target_len = 0.0f;
+    int center_q = 0;
+    int center_r = 0;
+    int entrance_center_q = 0;
+    int entrance_center_r = 0;
+
+    if (hive_enabled && hive_radius > 0) {
+        hive = (HiveSystem *)calloc(1, sizeof(HiveSystem));
+        if (!hive) {
+            free(tiles);
+            free(centers);
+            free(colors);
+            LOG_ERROR("hex: failed to allocate hive system");
+            return false;
+        }
+        hive->enabled = true;
+        hive->center_x = hive_center_x;
+        hive->center_y = hive_center_y;
+        hive->radius_tiles = hive_radius;
+        hive->storage_radius_tiles = storage_radius;
+        hive->honey_total_uL = 0.0f;
+        hive->pollen_total_uL = 0.0f;
+        float qf = 0.0f;
+        float rf = 0.0f;
+        hex_world_world_to_axial(world, hive_center_x, hive_center_y, &qf, &rf);
+        hex_world_axial_round(qf, rf, &center_q, &center_r);
+        hive->center_q = center_q;
+        hive->center_r = center_r;
+        int eq = center_q + HIVE_DIR_Q[entrance_dir] * hive_radius;
+        int er = center_r + HIVE_DIR_R[entrance_dir] * hive_radius;
+        entrance_center_q = eq;
+        entrance_center_r = er;
+        hex_world_axial_to_world(world, eq, er, &entrance_target_x, &entrance_target_y);
+        entrance_target_vx = entrance_target_x - hive_center_x;
+        entrance_target_vy = entrance_target_y - hive_center_y;
+        entrance_target_len = sqrtf(entrance_target_vx * entrance_target_vx +
+                                    entrance_target_vy * entrance_target_vy);
+    } else {
+        hive_enabled = false;
     }
 
     size_t index = 0;
@@ -217,21 +405,41 @@ static bool hex_world_build(HexWorld *world, const Params *params) {
             HexTile *tile = &tiles[index];
             HexTerrain terrain = HEX_TERRAIN_OPEN;
 
-            if (hive_enabled && cx >= hive_left && cx <= hive_right && cy >= hive_top && cy <= hive_bottom) {
-                terrain = HEX_TERRAIN_HIVE;
-            } else if (hive_enabled) {
-                float axis_delta;
-                float along_min = entrance_min - world->cell_radius;
-                float along_max = entrance_max + world->cell_radius;
-                if (entrance_horizontal) {
-                    axis_delta = fabsf(cy - entrance_axis);
-                    if (cx >= along_min && cx <= along_max && axis_delta <= world->cell_radius * 0.9f) {
-                        terrain = HEX_TERRAIN_ENTRANCE;
+            if (hive_enabled) {
+                int dist = hex_distance_axial(q, r, center_q, center_r);
+                if (dist < hive_radius) {
+                    if (storage_radius > 0 && dist <= storage_radius) {
+                        terrain = HEX_TERRAIN_HIVE_STORAGE;
+                    } else {
+                        terrain = HEX_TERRAIN_HIVE_INTERIOR;
                     }
-                } else {
-                    axis_delta = fabsf(cx - entrance_axis);
-                    if (cy >= along_min && cy <= along_max && axis_delta <= world->cell_radius * 0.9f) {
-                        terrain = HEX_TERRAIN_ENTRANCE;
+                } else if (dist == hive_radius) {
+                    terrain = HEX_TERRAIN_HIVE_WALL;
+                    if (entrance_target_len > 1e-5f) {
+                        float vx = cx - hive_center_x;
+                        float vy = cy - hive_center_y;
+                        float vlen = sqrtf(vx * vx + vy * vy);
+                        float dot = 0.0f;
+                        if (vlen > 1e-5f) {
+                            dot = (vx * entrance_target_vx + vy * entrance_target_vy) /
+                                  (vlen * entrance_target_len);
+                        }
+                        int dist_to_target = hex_distance_axial(q, r, entrance_center_q, entrance_center_r);
+                        float score = -(float)dist_to_target + dot * 0.001f;
+                        HiveEntranceCandidate candidate = {index, score};
+                        if (!push_candidate(&entrance_candidates,
+                                            &entrance_candidate_count,
+                                            &entrance_candidate_cap,
+                                            &candidate)) {
+                            LOG_ERROR("hex: failed to allocate hive entrance candidate");
+                            free(storage_indices);
+                            free(entrance_candidates);
+                            hive_system_free(hive);
+                            free(tiles);
+                            free(centers);
+                            free(colors);
+                            return false;
+                        }
                     }
                 }
             }
@@ -252,6 +460,21 @@ static bool hex_world_build(HexWorld *world, const Params *params) {
             }
 
             assign_tile_properties(tile, terrain);
+            if (terrain == HEX_TERRAIN_HIVE_STORAGE) {
+                tile->hive_honey_capacity = 900.0f;
+                size_t slot_index = storage_index_count;
+                if (!push_size_t(&storage_indices, &storage_index_count, &storage_index_cap, index)) {
+                    LOG_ERROR("hex: failed to allocate hive storage list");
+                    free(storage_indices);
+                    free(entrance_candidates);
+                    hive_system_free(hive);
+                    free(tiles);
+                    free(centers);
+                    free(colors);
+                    return false;
+                }
+                tile->hive_storage_slot = (int16_t)slot_index;
+            }
             if (terrain == HEX_TERRAIN_FLOWERS && flower_entry && flower_entry->vtable &&
                 flower_entry->vtable->generate_tile) {
                 uint64_t seed = ((uint64_t)(uint32_t)q << 32) ^ (uint64_t)(uint32_t)r;
@@ -265,6 +488,78 @@ static bool hex_world_build(HexWorld *world, const Params *params) {
             ++index;
         }
     }
+
+    if (hive) {
+        if (entrance_candidate_count > 0 && entrance_width > 0) {
+            if ((size_t)entrance_width > entrance_candidate_count) {
+                entrance_width = (int)entrance_candidate_count;
+            }
+            if (entrance_width <= 0) {
+                entrance_width = 1;
+            }
+            qsort(entrance_candidates,
+                  entrance_candidate_count,
+                  sizeof(HiveEntranceCandidate),
+                  compare_candidate_desc);
+            hive->entrance_tile_indices =
+                (size_t *)calloc((size_t)entrance_width, sizeof(size_t));
+            if (!hive->entrance_tile_indices) {
+                LOG_ERROR("hex: failed to allocate hive entrance list");
+                free(storage_indices);
+                free(entrance_candidates);
+                hive_system_free(hive);
+                free(tiles);
+                free(centers);
+                free(colors);
+                return false;
+            }
+            hive->entrance_tile_count = (size_t)entrance_width;
+            for (int i = 0; i < entrance_width; ++i) {
+                size_t idx = entrance_candidates[i].tile_index;
+                if (idx >= tile_count) {
+                    continue;
+                }
+                hive->entrance_tile_indices[i] = idx;
+                HexTile *tile = &tiles[idx];
+                assign_tile_properties(tile, HEX_TERRAIN_HIVE_ENTRANCE);
+                uint32_t base_color = world->palette[tile->terrain];
+                colors[idx] = base_color;
+            }
+        }
+        if (storage_index_count > 0) {
+            hive->storage_tiles =
+                (HiveStorageTilePayload *)calloc(storage_index_count, sizeof(HiveStorageTilePayload));
+            if (!hive->storage_tiles) {
+                LOG_ERROR("hex: failed to allocate hive storage payloads");
+                free(storage_indices);
+                free(entrance_candidates);
+                hive_system_free(hive);
+                free(tiles);
+                free(centers);
+                free(colors);
+                return false;
+            }
+            hive->storage_tile_count = storage_index_count;
+            for (size_t i = 0; i < storage_index_count; ++i) {
+                size_t idx = storage_indices[i];
+                if (idx >= tile_count) {
+                    continue;
+                }
+                HexTile *tile = &tiles[idx];
+                tile->hive_storage_slot = (int16_t)i;
+                hive->storage_tiles[i].tile_index = idx;
+                hive->storage_tiles[i].capacity_uL = tile->hive_honey_capacity;
+                hive->storage_tiles[i].stock_uL = tile->hive_honey_stock;
+            }
+        }
+        world->hive_system = hive;
+    } else {
+        world->hive_system = NULL;
+        hive_system_free(hive);
+    }
+
+    free(storage_indices);
+    free(entrance_candidates);
 
     hex_world_apply_palette(world, false);
 
@@ -310,6 +605,8 @@ void hex_world_shutdown(HexWorld *world) {
         free(world->flower_system);
         world->flower_system = NULL;
     }
+    hive_system_free(world->hive_system);
+    world->hive_system = NULL;
     free(world->tiles);
     free(world->centers_world_xy);
     free(world->fill_rgba);
@@ -387,6 +684,13 @@ bool hex_world_tile_debug_info(const HexWorld *world, size_t index, HexTileDebug
     out_info->flow_capacity = tile->flow_capacity;
     out_info->flower_archetype_id = tile->flower_archetype_id;
     out_info->flower_archetype_name = NULL;
+    out_info->hive_honey_stock = tile->hive_honey_stock;
+    out_info->hive_honey_capacity = tile->hive_honey_capacity;
+    out_info->hive_base_cost = tile->base_cost;
+    out_info->hive_passable = tile->passable;
+    out_info->hive_allows_deposit = tile->hive_deposit_enabled;
+    out_info->hive_total_honey = world->hive_system ? world->hive_system->honey_total_uL : 0.0f;
+    out_info->hive_total_pollen = world->hive_system ? world->hive_system->pollen_total_uL : 0.0f;
     if (tile->terrain == HEX_TERRAIN_FLOWERS && world->flower_system) {
         out_info->flower_archetype_name = tile_flower_archetype_name(world->flower_system, index);
     }
@@ -646,5 +950,148 @@ void hex_world_apply_palette(HexWorld *world, bool nectar_heatmap_enabled) {
             entry->vtable->apply_palette(entry->user_data, world, nectar_heatmap_enabled);
         }
     }
+}
+
+bool hex_world_tile_passable(const HexWorld *world, size_t index) {
+    if (!world || index >= world->tile_count || !world->tiles) {
+        return true;
+    }
+    return world->tiles[index].passable;
+}
+
+bool hex_world_tile_allows_deposit(const HexWorld *world, size_t index) {
+    if (!world || index >= world->tile_count || !world->tiles) {
+        return false;
+    }
+    return world->tiles[index].hive_deposit_enabled;
+}
+
+static HiveStorageTilePayload *hive_lookup_storage(HexWorld *world, int16_t slot) {
+    if (!world || !world->hive_system || !world->hive_system->storage_tiles || slot < 0) {
+        return NULL;
+    }
+    size_t idx = (size_t)slot;
+    if (idx >= world->hive_system->storage_tile_count) {
+        return NULL;
+    }
+    return &world->hive_system->storage_tiles[idx];
+}
+
+float hex_world_hive_deposit_at_tile(HexWorld *world, size_t index, float request_uL) {
+    if (!world || !world->hive_system || !world->hive_system->enabled || request_uL <= 0.0f) {
+        return 0.0f;
+    }
+    if (!world->tiles || index >= world->tile_count) {
+        return 0.0f;
+    }
+    HexTile *tile = &world->tiles[index];
+    if (!tile->hive_deposit_enabled) {
+        return 0.0f;
+    }
+    HiveStorageTilePayload *payload = hive_lookup_storage(world, tile->hive_storage_slot);
+    if (!payload) {
+        return 0.0f;
+    }
+    float capacity = payload->capacity_uL > 0.0f ? payload->capacity_uL : tile->hive_honey_capacity;
+    float stock = payload->stock_uL;
+    float space = capacity - stock;
+    if (space <= 1e-6f) {
+        return 0.0f;
+    }
+    float accepted = request_uL;
+    if (accepted > space) {
+        accepted = space;
+    }
+    if (accepted <= 0.0f) {
+        return 0.0f;
+    }
+    payload->stock_uL += accepted;
+    tile->hive_honey_stock = payload->stock_uL;
+    world->hive_system->honey_total_uL += accepted;
+    return accepted;
+}
+
+float hex_world_hive_deposit_world(HexWorld *world, float world_x, float world_y, float request_uL) {
+    if (!world || !world->hive_system || !world->hive_system->enabled || request_uL <= 0.0f) {
+        return 0.0f;
+    }
+    size_t primary_index = (size_t)SIZE_MAX;
+    if (!hex_world_tile_from_world(world, world_x, world_y, &primary_index)) {
+        return 0.0f;
+    }
+    return hex_world_hive_deposit_at_tile(world, primary_index, request_uL);
+}
+
+float hex_world_hive_total_honey(const HexWorld *world) {
+    if (!world || !world->hive_system || !world->hive_system->enabled) {
+        return 0.0f;
+    }
+    return world->hive_system->honey_total_uL;
+}
+
+float hex_world_hive_total_pollen(const HexWorld *world) {
+    if (!world || !world->hive_system || !world->hive_system->enabled) {
+        return 0.0f;
+    }
+    return world->hive_system->pollen_total_uL;
+}
+
+bool hex_world_hive_exists(const HexWorld *world) {
+    return world && world->hive_system;
+}
+
+bool hex_world_hive_enabled(const HexWorld *world) {
+    return world && world->hive_system && world->hive_system->enabled;
+}
+
+bool hex_world_hive_center(const HexWorld *world, float *out_x, float *out_y) {
+    if (!world || !world->hive_system || !world->hive_system->enabled) {
+        return false;
+    }
+    if (out_x) {
+        *out_x = world->hive_system->center_x;
+    }
+    if (out_y) {
+        *out_y = world->hive_system->center_y;
+    }
+    return true;
+}
+
+bool hex_world_hive_preferred_unload(const HexWorld *world, float *out_x, float *out_y) {
+    if (!world || !world->hive_system || !world->hive_system->enabled) {
+        return false;
+    }
+    if (world->hive_system->storage_tile_count > 0 && world->centers_world_xy) {
+        size_t tile_index = world->hive_system->storage_tiles[0].tile_index;
+        if (tile_index < world->tile_count) {
+            if (out_x) {
+                *out_x = world->centers_world_xy[2 * tile_index + 0];
+            }
+            if (out_y) {
+                *out_y = world->centers_world_xy[2 * tile_index + 1];
+            }
+            return true;
+        }
+    }
+    return hex_world_hive_center(world, out_x, out_y);
+}
+
+bool hex_world_hive_preferred_entrance(const HexWorld *world, float *out_x, float *out_y) {
+    if (!world || !world->hive_system || !world->hive_system->enabled) {
+        return false;
+    }
+    if (world->hive_system->entrance_tile_count > 0 && world->centers_world_xy) {
+        size_t tile_index = world->hive_system->entrance_tile_indices[0];
+        if (tile_index < world->tile_count) {
+            if (out_x) {
+                *out_x = world->centers_world_xy[2 * tile_index + 0];
+            }
+            if (out_y) {
+                *out_y = world->centers_world_xy[2 * tile_index + 1];
+            }
+            return true;
+        }
+    }
+    return hex_world_hive_center(world, out_x, out_y);
 }
 
