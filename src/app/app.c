@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include "hex.h"
 #include "params.h"
+#include "path/path.h"
+#include "path/path_debug.h"
 #include "platform.h"
 #include "render.h"
 #include "sim.h"
@@ -211,6 +213,10 @@ bool app_init(const Params *params) {
         return false;
     }
 
+    if (!path_init(&g_hex_world, &g_params)) {
+        LOG_WARN("path: initialization failed; debug overlays disabled");
+    }
+
     ui_init();
     ui_sync_to_params(&g_params, &g_params_runtime);
 
@@ -303,6 +309,9 @@ static bool app_apply_runtime_params(bool reinit_required) {
         }
         if (g_sim) {
             sim_bind_hex_world(g_sim, &g_hex_world);
+        }
+        if (!path_init(&g_hex_world, &new_params)) {
+            LOG_WARN("path: rebuild failed; flow field unavailable");
         }
     }
 
@@ -459,6 +468,8 @@ void app_frame(void) {
 
     app_update_camera(&camera_input, timing.dt_sec);
 
+    path_update(&g_hex_world, &g_params_runtime, timing.dt_sec);
+
     if (!g_sim_paused) {
         g_sim_accumulator_sec += timing.dt_sec;
         if (g_sim_accumulator_sec > g_sim_max_accumulator) {
@@ -525,9 +536,7 @@ void app_frame(void) {
         app_recompute_world_defaults();
     }
 
-    float debug_line_points[4 * 8] = {0.0f};
-    uint32_t debug_line_colors[8] = {0};
-    size_t debug_line_count = 0;
+    path_debug_begin_frame();
 
     RenderHexView hex_view = (RenderHexView){0};
     RenderHexView *hex_view_ptr = NULL;
@@ -566,25 +575,19 @@ void app_frame(void) {
                     bool distinct_waypoint = info.path_has_waypoint &&
                                              (fabsf(info.path_waypoint_x - info.path_final_x) > eps ||
                                               fabsf(info.path_waypoint_y - info.path_final_y) > eps);
-                    if (debug_line_count < 8) {
-                        size_t base = debug_line_count * 4;
-                        debug_line_points[base + 0] = info.pos_x;
-                        debug_line_points[base + 1] = info.pos_y;
-                        debug_line_points[base + 2] =
-                            distinct_waypoint ? info.path_waypoint_x : info.path_final_x;
-                        debug_line_points[base + 3] =
-                            distinct_waypoint ? info.path_waypoint_y : info.path_final_y;
-                        debug_line_colors[debug_line_count] = debug_color;
-                        ++debug_line_count;
-                    }
-                    if (distinct_waypoint && debug_line_count < 8) {
-                        size_t base = debug_line_count * 4;
-                        debug_line_points[base + 0] = info.path_waypoint_x;
-                        debug_line_points[base + 1] = info.path_waypoint_y;
-                        debug_line_points[base + 2] = info.path_final_x;
-                        debug_line_points[base + 3] = info.path_final_y;
-                        debug_line_colors[debug_line_count] = debug_color;
-                        ++debug_line_count;
+                    float line_end_x = distinct_waypoint ? info.path_waypoint_x : info.path_final_x;
+                    float line_end_y = distinct_waypoint ? info.path_waypoint_y : info.path_final_y;
+                    path_debug_add_line(info.pos_x,
+                                        info.pos_y,
+                                        line_end_x,
+                                        line_end_y,
+                                        debug_color);
+                    if (distinct_waypoint) {
+                        path_debug_add_line(info.path_waypoint_x,
+                                            info.path_waypoint_y,
+                                            info.path_final_x,
+                                            info.path_final_y,
+                                            debug_color);
                     }
                 }
             } else {
@@ -600,19 +603,17 @@ void app_frame(void) {
         HexTileDebugInfo hex_info;
         if (hex_world_tile_debug_info(&g_hex_world, g_selected_hex_index, &hex_info)) {
             ui_set_selected_hex(&hex_info, true);
-            if (hex_tile_count > 0 && debug_line_count < 8) {
+            if (hex_tile_count > 0) {
                 float corners[6][2];
                 hex_world_tile_corners(&g_hex_world, hex_info.q, hex_info.r, corners);
                 const uint32_t hex_line_color = 0xFFD780FFu;
-                for (int i = 0; i < 6 && debug_line_count < 8; ++i) {
+                for (int i = 0; i < 6; ++i) {
                     int next = (i + 1) % 6;
-                    size_t base = debug_line_count * 4;
-                    debug_line_points[base + 0] = corners[i][0];
-                    debug_line_points[base + 1] = corners[i][1];
-                    debug_line_points[base + 2] = corners[next][0];
-                    debug_line_points[base + 3] = corners[next][1];
-                    debug_line_colors[debug_line_count] = hex_line_color;
-                    ++debug_line_count;
+                    path_debug_add_line(corners[i][0],
+                                        corners[i][1],
+                                        corners[next][0],
+                                        corners[next][1],
+                                        hex_line_color);
                 }
             }
         } else {
@@ -620,9 +621,12 @@ void app_frame(void) {
             ui_set_selected_hex(NULL, false);
         }
     }
-    if (debug_line_count > 0) {
-        view.debug_lines_xy = debug_line_points;
-        view.debug_line_rgba = debug_line_colors;
+    const float *debug_lines_xy = path_debug_lines_xy();
+    const uint32_t *debug_line_rgba = path_debug_lines_rgba();
+    size_t debug_line_count = path_debug_line_count();
+    if (debug_line_count > 0 && debug_lines_xy && debug_line_rgba) {
+        view.debug_lines_xy = debug_lines_xy;
+        view.debug_line_rgba = debug_line_rgba;
         view.debug_line_count = debug_line_count;
     }
     if (hex_view_ptr) {
@@ -642,6 +646,7 @@ void app_shutdown(void) {
     sim_shutdown(g_sim);
     g_sim = NULL;
     ui_shutdown();
+    path_shutdown();
     hex_world_shutdown(&g_hex_world);
     render_shutdown(&g_render);
     plat_shutdown(&g_platform);

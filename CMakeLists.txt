@@ -13,6 +13,10 @@ add_executable(bee_sim
   src/sim/bee.c
   src/sim/bee_path.c
   src/sim/sim.c
+  src/path/path_core.c
+  src/path/path_fields.c
+  src/path/path_scheduler.c
+  src/path/path_debug.c
   src/world/hex_world.c
   src/world/tiles/tile_core.c
   src/world/tiles/flower/tile_flower.c
