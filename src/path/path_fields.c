@@ -34,14 +34,18 @@ typedef struct PathFieldBuildState {
     bool in_progress;
 } PathFieldBuildState;
 
-typedef struct PathFieldState {
+typedef struct PathFieldGoalState {
     float *dist[2];
     uint8_t *next[2];
-    size_t tile_count;
     int active_index;
     int build_index;
     uint32_t stamp;
-    PathFieldBuildState entrance;
+    PathFieldBuildState build;
+} PathFieldGoalState;
+
+typedef struct PathFieldState {
+    size_t tile_count;
+    PathFieldGoalState goals[PATH_GOAL_COUNT];
 } PathFieldState;
 
 static PathFieldState g_field_state = {0};
@@ -50,6 +54,13 @@ static const float kInf = FLT_MAX / 4.0f;
 
 static double clock_now_ms(void) {
     return (double)clock() * (1000.0 / (double)CLOCKS_PER_SEC);
+}
+
+static PathFieldGoalState *field_goal_state(PathGoal goal) {
+    if (goal < 0 || goal >= PATH_GOAL_COUNT) {
+        return NULL;
+    }
+    return &g_field_state.goals[goal];
 }
 
 static bool heap_reserve(PathHeap *heap, size_t capacity) {
@@ -74,7 +85,7 @@ static bool heap_reserve(PathHeap *heap, size_t capacity) {
 
 static void heap_clear(PathHeap *heap) {
     if (heap) {
-        heap->size = 0;
+        heap->size = 0u;
     }
 }
 
@@ -94,7 +105,7 @@ static bool heap_push(PathHeap *heap, TileId id, float dist) {
     size_t index = heap->size++;
     heap->data[index].id = id;
     heap->data[index].dist = dist;
-    while (index > 0) {
+    while (index > 0u) {
         size_t parent = (index - 1u) / 2u;
         if (heap->data[parent].dist <= heap->data[index].dist) {
             break;
@@ -106,18 +117,18 @@ static bool heap_push(PathHeap *heap, TileId id, float dist) {
 }
 
 static bool heap_pop(PathHeap *heap, PathNode *out_node) {
-    if (!heap || heap->size == 0) {
+    if (!heap || heap->size == 0u) {
         return false;
     }
     if (out_node) {
         *out_node = heap->data[0];
     }
     heap->size -= 1u;
-    if (heap->size == 0) {
+    if (heap->size == 0u) {
         return true;
     }
     heap->data[0] = heap->data[heap->size];
-    size_t index = 0;
+    size_t index = 0u;
     while (true) {
         size_t left = index * 2u + 1u;
         size_t right = left + 1u;
@@ -146,71 +157,86 @@ static uint8_t opposite_direction(uint8_t dir) {
 }
 
 bool path_fields_init_storage(size_t tile_count) {
-    if (tile_count == 0) {
+    if (tile_count == 0u) {
         path_fields_shutdown_storage();
         return true;
     }
-    bool size_changed = (g_field_state.tile_count != tile_count) || !g_field_state.dist[0] ||
-                        !g_field_state.dist[1] || !g_field_state.next[0] || !g_field_state.next[1];
-    if (size_changed) {
-        float *dist0 = (float *)malloc(tile_count * sizeof(float));
-        float *dist1 = (float *)malloc(tile_count * sizeof(float));
-        uint8_t *next0 = (uint8_t *)malloc(tile_count * sizeof(uint8_t));
-        uint8_t *next1 = (uint8_t *)malloc(tile_count * sizeof(uint8_t));
-        if (!dist0 || !dist1 || !next0 || !next1) {
-            free(dist0);
-            free(dist1);
-            free(next0);
-            free(next1);
-            LOG_ERROR("path: failed to allocate field storage (%zu tiles)", tile_count);
-            return false;
+
+    float *new_dist[PATH_GOAL_COUNT][2] = {{0}};
+    uint8_t *new_next[PATH_GOAL_COUNT][2] = {{0}};
+
+    for (int goal = 0; goal < PATH_GOAL_COUNT; ++goal) {
+        for (int buffer = 0; buffer < 2; ++buffer) {
+            new_dist[goal][buffer] = (float *)malloc(tile_count * sizeof(float));
+            new_next[goal][buffer] = (uint8_t *)malloc(tile_count * sizeof(uint8_t));
+            if (!new_dist[goal][buffer] || !new_next[goal][buffer]) {
+                for (int g = 0; g <= goal; ++g) {
+                    for (int b = 0; b < 2; ++b) {
+                        free(new_dist[g][b]);
+                        free(new_next[g][b]);
+                    }
+                }
+                LOG_ERROR("path: failed to allocate field storage (%zu tiles)", tile_count);
+                return false;
+            }
         }
-        free(g_field_state.dist[0]);
-        free(g_field_state.dist[1]);
-        free(g_field_state.next[0]);
-        free(g_field_state.next[1]);
-        g_field_state.dist[0] = dist0;
-        g_field_state.dist[1] = dist1;
-        g_field_state.next[0] = next0;
-        g_field_state.next[1] = next1;
     }
+
+    for (int goal = 0; goal < PATH_GOAL_COUNT; ++goal) {
+        PathFieldGoalState *goal_state = &g_field_state.goals[goal];
+        for (int buffer = 0; buffer < 2; ++buffer) {
+            free(goal_state->dist[buffer]);
+            free(goal_state->next[buffer]);
+            goal_state->dist[buffer] = new_dist[goal][buffer];
+            goal_state->next[buffer] = new_next[goal][buffer];
+        }
+        goal_state->active_index = 0;
+        goal_state->build_index = 1;
+        goal_state->stamp = 0u;
+        goal_state->build.in_progress = false;
+        goal_state->build.dist = NULL;
+        goal_state->build.next = NULL;
+        goal_state->build.neighbors = NULL;
+        goal_state->build.goals = NULL;
+        goal_state->build.goal_count = 0u;
+        goal_state->build.eff_cost = NULL;
+        goal_state->build.dirty_tiles = NULL;
+        goal_state->build.dirty_count = 0u;
+        heap_clear(&goal_state->build.heap);
+    }
+
     g_field_state.tile_count = tile_count;
-    g_field_state.active_index = 0;
-    g_field_state.build_index = 1;
-    g_field_state.stamp = 0u;
-    g_field_state.entrance.in_progress = false;
-    g_field_state.entrance.dist = NULL;
-    g_field_state.entrance.next = NULL;
-    g_field_state.entrance.neighbors = NULL;
-    g_field_state.entrance.goals = NULL;
-    g_field_state.entrance.goal_count = 0u;
-    heap_clear(&g_field_state.entrance.heap);
     return true;
 }
 
 void path_fields_shutdown_storage(void) {
-    free(g_field_state.dist[0]);
-    free(g_field_state.dist[1]);
-    free(g_field_state.next[0]);
-    free(g_field_state.next[1]);
-    g_field_state.dist[0] = NULL;
-    g_field_state.dist[1] = NULL;
-    g_field_state.next[0] = NULL;
-    g_field_state.next[1] = NULL;
+    for (int goal = 0; goal < PATH_GOAL_COUNT; ++goal) {
+        PathFieldGoalState *goal_state = &g_field_state.goals[goal];
+        for (int buffer = 0; buffer < 2; ++buffer) {
+            free(goal_state->dist[buffer]);
+            free(goal_state->next[buffer]);
+            goal_state->dist[buffer] = NULL;
+            goal_state->next[buffer] = NULL;
+        }
+        heap_clear(&goal_state->build.heap);
+        free(goal_state->build.heap.data);
+        goal_state->build.heap.data = NULL;
+        goal_state->build.heap.capacity = 0u;
+        goal_state->build.heap.size = 0u;
+        goal_state->build.in_progress = false;
+        goal_state->build.dist = NULL;
+        goal_state->build.next = NULL;
+        goal_state->build.neighbors = NULL;
+        goal_state->build.goals = NULL;
+        goal_state->build.goal_count = 0u;
+        goal_state->build.eff_cost = NULL;
+        goal_state->build.dirty_tiles = NULL;
+        goal_state->build.dirty_count = 0u;
+        goal_state->stamp = 0u;
+        goal_state->active_index = 0;
+        goal_state->build_index = 1;
+    }
     g_field_state.tile_count = 0u;
-    g_field_state.active_index = 0;
-    g_field_state.build_index = 1;
-    g_field_state.stamp = 0u;
-    g_field_state.entrance.in_progress = false;
-    g_field_state.entrance.dist = NULL;
-    g_field_state.entrance.next = NULL;
-    g_field_state.entrance.neighbors = NULL;
-    g_field_state.entrance.goals = NULL;
-    g_field_state.entrance.goal_count = 0u;
-    free(g_field_state.entrance.heap.data);
-    g_field_state.entrance.heap.data = NULL;
-    g_field_state.entrance.heap.size = 0u;
-    g_field_state.entrance.heap.capacity = 0u;
 }
 
 bool path_fields_start_build(PathGoal goal,
@@ -222,38 +248,42 @@ bool path_fields_start_build(PathGoal goal,
                              const TileId *dirty_tiles,
                              size_t dirty_count) {
     (void)world;
-    if (goal != PATH_GOAL_ENTRANCE) {
+    PathFieldGoalState *goal_state = field_goal_state(goal);
+    if (!goal_state) {
         return false;
     }
-    if (!neighbors || !goals || goal_count == 0) {
-        LOG_WARN("path: cannot build entrance field without goals");
+    if (!neighbors || !goals || goal_count == 0u) {
+        LOG_WARN("path: cannot build field for goal %d without goals", (int)goal);
         return false;
     }
     if (g_field_state.tile_count == 0u) {
         return false;
     }
-    PathFieldBuildState *build = &g_field_state.entrance;
+
+    PathFieldBuildState *build = &goal_state->build;
     build->neighbors = neighbors;
     build->goals = goals;
     build->goal_count = goal_count;
     build->eff_cost = eff_cost;
     build->dirty_tiles = dirty_tiles;
     build->dirty_count = dirty_count;
-    build->dist = g_field_state.dist[g_field_state.build_index];
-    build->next = g_field_state.next[g_field_state.build_index];
+    build->dist = goal_state->dist[goal_state->build_index];
+    build->next = goal_state->next[goal_state->build_index];
     if (!build->dist || !build->next) {
         return false;
     }
+
     size_t tile_count = g_field_state.tile_count;
     for (size_t i = 0; i < tile_count; ++i) {
         build->dist[i] = kInf;
     }
     memset(build->next, 0xFF, tile_count * sizeof(uint8_t));
     heap_clear(&build->heap);
-    if (!heap_reserve(&build->heap, goal_count)) {
-        LOG_ERROR("path: failed to reserve heap for entrance goals");
+    if (!heap_reserve(&build->heap, goal_count + dirty_count + 4u)) {
+        LOG_ERROR("path: failed to reserve heap for goal %d", (int)goal);
         return false;
     }
+
     for (size_t i = 0; i < goal_count; ++i) {
         TileId goal_id = goals[i];
         if ((size_t)goal_id >= tile_count) {
@@ -262,14 +292,15 @@ bool path_fields_start_build(PathGoal goal,
         build->dist[goal_id] = 0.0f;
         build->next[goal_id] = 255u;
         if (!heap_push(&build->heap, goal_id, 0.0f)) {
-            LOG_ERROR("path: failed to seed entrance heap");
+            LOG_ERROR("path: failed to seed heap for goal %d", (int)goal);
             heap_clear(&build->heap);
             return false;
         }
     }
+
     if (dirty_tiles && dirty_count > 0u) {
-        const float *active_dist = g_field_state.dist[g_field_state.active_index];
-        const uint8_t *active_next = g_field_state.next[g_field_state.active_index];
+        const float *active_dist = goal_state->dist[goal_state->active_index];
+        const uint8_t *active_next = goal_state->next[goal_state->active_index];
         for (size_t i = 0; i < dirty_count; ++i) {
             TileId nid = dirty_tiles[i];
             if ((size_t)nid >= tile_count) {
@@ -284,18 +315,20 @@ bool path_fields_start_build(PathGoal goal,
                 build->dist[nid] = seed_dist;
                 build->next[nid] = seed_next;
                 if (!heap_push(&build->heap, nid, seed_dist)) {
-                    LOG_ERROR("path: failed to push dirty seed during entrance build");
+                    LOG_ERROR("path: failed to push dirty seed for goal %d", (int)goal);
                     path_fields_cancel_build(goal);
                     return false;
                 }
             }
         }
     }
+
     if (build->heap.size == 0u) {
-        LOG_WARN("path: entrance build has no valid seeds");
+        LOG_WARN("path: goal %d build has no valid seeds", (int)goal);
         heap_clear(&build->heap);
         return false;
     }
+
     build->in_progress = true;
     return true;
 }
@@ -314,18 +347,23 @@ bool path_fields_step(PathGoal goal,
     if (out_finished) {
         *out_finished = false;
     }
-    if (goal != PATH_GOAL_ENTRANCE) {
+
+    PathFieldGoalState *goal_state = field_goal_state(goal);
+    if (!goal_state) {
         return false;
     }
-    PathFieldBuildState *build = &g_field_state.entrance;
+
+    PathFieldBuildState *build = &goal_state->build;
     if (!build->in_progress || !build->dist || !build->next || !build->neighbors) {
         return false;
     }
+
     size_t tile_count = g_field_state.tile_count;
     if (tile_count == 0u) {
         build->in_progress = false;
         return false;
     }
+
     double budget = time_budget_ms;
     if (budget < 0.0) {
         budget = 0.0;
@@ -333,6 +371,7 @@ bool path_fields_step(PathGoal goal,
     bool check_time = (budget > 0.0);
     double start_ms = clock_now_ms();
     size_t relaxed = 0u;
+
     while (build->heap.size > 0u) {
         PathNode current;
         if (!heap_pop(&build->heap, &current)) {
@@ -345,7 +384,7 @@ bool path_fields_step(PathGoal goal,
             continue;
         }
         const int32_t *nbrs = build->neighbors + (size_t)current.id * 6u;
-        for (uint8_t dir = 0; dir < 6u; ++dir) {
+        for (uint8_t dir = 0u; dir < 6u; ++dir) {
             int32_t neighbor = nbrs[dir];
             if (neighbor < 0) {
                 continue;
@@ -363,7 +402,7 @@ bool path_fields_step(PathGoal goal,
                 build->dist[v] = alt;
                 build->next[v] = opposite_direction(dir);
                 if (!heap_push(&build->heap, (TileId)v, alt)) {
-                    LOG_ERROR("path: failed to push node during entrance build");
+                    LOG_ERROR("path: failed to push node during goal %d build", (int)goal);
                     path_fields_cancel_build(goal);
                     return false;
                 }
@@ -381,6 +420,7 @@ bool path_fields_step(PathGoal goal,
             }
         }
     }
+
     double elapsed_ms = clock_now_ms() - start_ms;
     if (out_relaxed) {
         *out_relaxed = relaxed;
@@ -388,13 +428,14 @@ bool path_fields_step(PathGoal goal,
     if (out_elapsed_ms) {
         *out_elapsed_ms = elapsed_ms;
     }
+
     if (build->heap.size == 0u) {
         build->in_progress = false;
-        g_field_state.active_index = g_field_state.build_index;
-        g_field_state.build_index = g_field_state.active_index ^ 1;
-        ++g_field_state.stamp;
-        if (g_field_state.stamp == 0u) {
-            g_field_state.stamp = 1u;
+        goal_state->active_index = goal_state->build_index;
+        goal_state->build_index = goal_state->active_index ^ 1;
+        ++goal_state->stamp;
+        if (goal_state->stamp == 0u) {
+            goal_state->stamp = 1u;
         }
         build->dist = NULL;
         build->next = NULL;
@@ -402,21 +443,24 @@ bool path_fields_step(PathGoal goal,
             *out_finished = true;
         }
     }
+
     return true;
 }
 
 bool path_fields_is_building(PathGoal goal) {
-    if (goal != PATH_GOAL_ENTRANCE) {
+    PathFieldGoalState *goal_state = field_goal_state(goal);
+    if (!goal_state) {
         return false;
     }
-    return g_field_state.entrance.in_progress;
+    return goal_state->build.in_progress;
 }
 
 void path_fields_cancel_build(PathGoal goal) {
-    if (goal != PATH_GOAL_ENTRANCE) {
+    PathFieldGoalState *goal_state = field_goal_state(goal);
+    if (!goal_state) {
         return;
     }
-    PathFieldBuildState *build = &g_field_state.entrance;
+    PathFieldBuildState *build = &goal_state->build;
     build->in_progress = false;
     build->dist = NULL;
     build->next = NULL;
@@ -427,24 +471,27 @@ void path_fields_cancel_build(PathGoal goal) {
 }
 
 const float *path_field_dist(PathGoal goal) {
-    if (goal != PATH_GOAL_ENTRANCE) {
+    PathFieldGoalState *goal_state = field_goal_state(goal);
+    if (!goal_state) {
         return NULL;
     }
-    return g_field_state.dist[g_field_state.active_index];
+    return goal_state->dist[goal_state->active_index];
 }
 
 const uint8_t *path_field_next(PathGoal goal) {
-    if (goal != PATH_GOAL_ENTRANCE) {
+    PathFieldGoalState *goal_state = field_goal_state(goal);
+    if (!goal_state) {
         return NULL;
     }
-    return g_field_state.next[g_field_state.active_index];
+    return goal_state->next[goal_state->active_index];
 }
 
 uint32_t path_field_stamp(PathGoal goal) {
-    if (goal != PATH_GOAL_ENTRANCE) {
+    PathFieldGoalState *goal_state = field_goal_state(goal);
+    if (!goal_state) {
         return 0u;
     }
-    return g_field_state.stamp;
+    return goal_state->stamp;
 }
 
 size_t path_field_tile_count(void) {

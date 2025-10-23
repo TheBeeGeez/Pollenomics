@@ -47,7 +47,7 @@ void path_sched_set_goal_data(PathGoal goal,
                               const TileId *goals,
                               size_t goal_count,
                               size_t tile_count);
-bool path_sched_update(float dt_sec, bool *out_field_swapped);
+bool path_sched_update(float dt_sec, bool out_field_swapped[PATH_GOAL_COUNT]);
 
 bool path_cost_init(const struct HexWorld *world);
 void path_cost_shutdown(void);

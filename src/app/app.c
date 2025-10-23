@@ -9,6 +9,7 @@
 #include "render.h"
 #include "sim.h"
 #include "ui.h"
+#include "bee.h"
 
 #include "util/log.h"
 
@@ -570,7 +571,11 @@ void app_frame(void) {
             if (sim_get_bee_info(g_sim, g_selected_bee_index, &info)) {
                 ui_set_selected_bee(&info, true);
                 if (info.path_valid) {
-                    const uint32_t debug_color = 0xFF0000FFu;
+                    uint32_t debug_color = 0xFF0000FFu;
+                    if ((info.mode == BEE_MODE_RETURNING || info.mode == BEE_MODE_ENTERING) &&
+                        info.path_valid == 2u) {
+                        debug_color = 0x33AAFFFFu;
+                    }
                     const float eps = 1e-3f;
                     bool distinct_waypoint = info.path_has_waypoint &&
                                              (fabsf(info.path_waypoint_x - info.path_final_x) > eps ||

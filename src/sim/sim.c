@@ -13,6 +13,7 @@
 
 #include "sim_internal.h"
 #include "bee_path.h"
+#include "path/path.h"
 #include "path/path_cost.h"
 #include "world/tiles/tile_flower.h"
 
@@ -981,7 +982,57 @@ void sim_tick(SimState *state, float dt_sec) {
         float desired_vx = 0.0f;
         float desired_vy = 0.0f;
         if (flight_mode) {
+            bool used_flow_field = false;
             if (distance > 1e-5f) {
+                PathGoal query_goal = PATH_GOAL_COUNT;
+                if (mode == BEE_MODE_RETURNING) {
+                    query_goal = PATH_GOAL_ENTRANCE;
+                } else if (mode == BEE_MODE_ENTERING || (mode == BEE_MODE_UNLOADING && unloading_needs_move)) {
+                    query_goal = PATH_GOAL_UNLOAD;
+                }
+                if (query_goal < PATH_GOAL_COUNT) {
+                    TileId query_tile = -1;
+                    if (state->bee_tile_index) {
+                        query_tile = state->bee_tile_index[i];
+                    }
+                    if (query_tile < 0 && state->hex_world) {
+                        size_t tile_index = (size_t)SIZE_MAX;
+                        if (hex_world_tile_from_world(state->hex_world, x, y, &tile_index) &&
+                            tile_index < state->world_tile_count) {
+                            query_tile = (TileId)tile_index;
+                            if (state->bee_tile_index) {
+                                state->bee_tile_index[i] = (int32_t)tile_index;
+                            }
+                        }
+                    }
+                    if (query_tile >= 0) {
+                        PathVec2 field_dir = {0.0f, 0.0f};
+                        if (path_query_direction(query_goal, query_tile, &field_dir)) {
+                            float len_sq = field_dir.x * field_dir.x + field_dir.y * field_dir.y;
+                            if (len_sq > 1e-6f) {
+                                float jitter = 0.08f * rand_symmetric(&rng);
+                                float cos_j = cosf(jitter);
+                                float sin_j = sinf(jitter);
+                                float rot_x = field_dir.x * cos_j - field_dir.y * sin_j;
+                                float rot_y = field_dir.x * sin_j + field_dir.y * cos_j;
+                                desired_vx = rot_x * base_speed;
+                                desired_vy = rot_y * base_speed;
+                                float arrow_scale = state->hex_world ? state->hex_world->cell_radius : current_arrive_tol;
+                                if (arrow_scale <= 0.0f) {
+                                    arrow_scale = current_arrive_tol;
+                                }
+                                path_waypoint_x = x + field_dir.x * arrow_scale;
+                                path_waypoint_y = y + field_dir.y * arrow_scale;
+                                path_has_waypoint = 0u;
+                                path_valid = 2u;
+                                used_flow_field = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!used_flow_field && distance > 1e-5f) {
                 float dir_x = 0.0f;
                 float dir_y = 0.0f;
                 BeePathPlan path_plan = {0};

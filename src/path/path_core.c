@@ -24,6 +24,8 @@ static size_t g_tile_count = 0;
 static int32_t *g_neighbors = NULL;
 static TileId *g_goal_entrance = NULL;
 static size_t g_goal_entrance_count = 0;
+static TileId *g_goal_unload = NULL;
+static size_t g_goal_unload_count = 0;
 static float g_dir_world[6][2] = {{0}};
 static bool g_path_initialized = false;
 
@@ -32,8 +34,11 @@ static void clear_core_storage(void) {
     g_neighbors = NULL;
     free(g_goal_entrance);
     g_goal_entrance = NULL;
+    free(g_goal_unload);
+    g_goal_unload = NULL;
     g_tile_count = 0;
     g_goal_entrance_count = 0;
+    g_goal_unload_count = 0;
     g_world = NULL;
     memset(g_dir_world, 0, sizeof(g_dir_world));
 }
@@ -136,6 +141,38 @@ static bool build_entrance_goals(const HexWorld *world) {
     return true;
 }
 
+static bool build_unload_goals(const HexWorld *world) {
+    size_t tile_count = hex_world_tile_count(world);
+    if (tile_count == 0) {
+        g_goal_unload = NULL;
+        g_goal_unload_count = 0;
+        return false;
+    }
+    TileId *goals = (TileId *)malloc(tile_count * sizeof(TileId));
+    if (!goals) {
+        LOG_ERROR("path: failed to allocate unload goal buffer (%zu tiles)", tile_count);
+        return false;
+    }
+    size_t count = 0;
+    for (size_t index = 0; index < tile_count; ++index) {
+        const HexTile *tile = &world->tiles[index];
+        if (tile->terrain == HEX_TERRAIN_HIVE_STORAGE) {
+            goals[count++] = index;
+        }
+    }
+    if (count == 0) {
+        free(goals);
+        g_goal_unload = NULL;
+        g_goal_unload_count = 0;
+        LOG_WARN("path: no unload/storage tiles found; unload field disabled");
+        return true;
+    }
+    TileId *shrink = (TileId *)realloc(goals, count * sizeof(TileId));
+    g_goal_unload = shrink ? shrink : goals;
+    g_goal_unload_count = count;
+    return true;
+}
+
 const float *path_core_direction_world(uint8_t dir_index) {
     if (dir_index >= 6u) {
         return NULL;
@@ -173,6 +210,11 @@ bool path_init(const HexWorld *world, const Params *params) {
         return false;
     }
 
+    if (!build_unload_goals(world)) {
+        LOG_WARN("path: unload goal build failed; unload field disabled");
+        g_goal_unload_count = 0;
+    }
+
     if (!path_cost_init(world)) {
         LOG_ERROR("path: failed to initialize cost buffers");
         path_shutdown();
@@ -206,11 +248,41 @@ bool path_init(const HexWorld *world, const Params *params) {
         }
     }
 
+    if (g_goal_unload_count > 0u) {
+        bool started_unload = path_fields_start_build(PATH_GOAL_UNLOAD,
+                                                      world,
+                                                      g_neighbors,
+                                                      g_goal_unload,
+                                                      g_goal_unload_count,
+                                                      path_cost_eff_costs(),
+                                                      NULL,
+                                                      0u);
+        if (started_unload) {
+            bool unload_finished = false;
+            while (!unload_finished) {
+                if (!path_fields_step(PATH_GOAL_UNLOAD, 1000000.0, NULL, NULL, &unload_finished)) {
+                    LOG_ERROR("path: failed while building unload field");
+                    g_goal_unload_count = 0u;
+                    break;
+                }
+            }
+        } else {
+            LOG_WARN("path: unable to build unload field; using entrance field only");
+            g_goal_unload_count = 0u;
+        }
+    }
+
     path_sched_set_goal_data(PATH_GOAL_ENTRANCE,
                              world,
                              g_neighbors,
                              g_goal_entrance,
                              g_goal_entrance_count,
+                             g_tile_count);
+    path_sched_set_goal_data(PATH_GOAL_UNLOAD,
+                             world,
+                             g_neighbors,
+                             (g_goal_unload_count > 0u) ? g_goal_unload : NULL,
+                             g_goal_unload_count,
                              g_tile_count);
 
     if (!path_debug_init()) {
@@ -224,7 +296,10 @@ bool path_init(const HexWorld *world, const Params *params) {
     }
 
     g_path_initialized = true;
-    LOG_INFO("path: entrance field built (tiles=%zu goals=%zu)", g_tile_count, g_goal_entrance_count);
+    LOG_INFO("path: fields built (tiles=%zu entrance_goals=%zu unload_goals=%zu)",
+             g_tile_count,
+             g_goal_entrance_count,
+             g_goal_unload_count);
     return true;
 }
 
@@ -247,11 +322,11 @@ void path_update(const HexWorld *world, const Params *params, float dt_sec) {
         return;
     }
 
-    bool swapped = false;
-    if (!path_sched_update(dt_sec, &swapped)) {
+    bool swapped[PATH_GOAL_COUNT] = {false};
+    if (!path_sched_update(dt_sec, swapped)) {
         return;
     }
-    if (swapped) {
+    if (swapped[PATH_GOAL_ENTRANCE]) {
         const uint8_t *next = path_field_next(PATH_GOAL_ENTRANCE);
         size_t tile_count = path_field_tile_count();
         if (next && tile_count == g_tile_count) {
@@ -268,6 +343,19 @@ void path_update(const HexWorld *world, const Params *params, float dt_sec) {
             LOG_INFO("path: entrance swap stamp=%u build_ms=%.3f relaxed=%zu dirty=%zu",
                      stamp,
                      build_ms,
+                    relaxed,
+                    dirty_processed);
+        }
+    }
+    if (swapped[PATH_GOAL_UNLOAD]) {
+        uint32_t stamp = path_sched_get_stamp(PATH_GOAL_UNLOAD);
+        float build_ms = path_sched_get_last_build_ms(PATH_GOAL_UNLOAD);
+        size_t relaxed = path_sched_get_last_relaxed(PATH_GOAL_UNLOAD);
+        size_t dirty_processed = path_sched_get_dirty_processed_last_build(PATH_GOAL_UNLOAD);
+        if (dirty_processed > 0u || build_ms > 0.0f) {
+            LOG_INFO("path: unload swap stamp=%u build_ms=%.3f relaxed=%zu dirty=%zu",
+                     stamp,
+                     build_ms,
                      relaxed,
                      dirty_processed);
         }
@@ -275,14 +363,20 @@ void path_update(const HexWorld *world, const Params *params, float dt_sec) {
 }
 
 void path_force_recompute(PathGoal goal) {
-    if (!g_path_initialized || goal != PATH_GOAL_ENTRANCE) {
+    if (!g_path_initialized || goal < 0 || goal >= PATH_GOAL_COUNT) {
         return;
     }
     path_sched_force_full_recompute(goal);
 }
 
 bool path_query_direction(PathGoal goal, TileId nid, PathVec2 *dir_world_out) {
-    if (!dir_world_out || goal != PATH_GOAL_ENTRANCE || !g_world) {
+    if (!dir_world_out || !g_world) {
+        return false;
+    }
+    if (goal == PATH_GOAL_UNLOAD && g_goal_unload_count == 0u) {
+        goal = PATH_GOAL_ENTRANCE;
+    }
+    if (goal < 0 || goal >= PATH_GOAL_COUNT) {
         return false;
     }
     if (nid >= g_tile_count) {
