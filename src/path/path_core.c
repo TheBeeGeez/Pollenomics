@@ -173,6 +173,12 @@ bool path_init(const HexWorld *world, const Params *params) {
         return false;
     }
 
+    if (!path_cost_init(world)) {
+        LOG_ERROR("path: failed to initialize cost buffers");
+        path_shutdown();
+        return false;
+    }
+
     if (!path_fields_init_storage(g_tile_count)) {
         path_shutdown();
         return false;
@@ -182,7 +188,10 @@ bool path_init(const HexWorld *world, const Params *params) {
                                  world,
                                  g_neighbors,
                                  g_goal_entrance,
-                                 g_goal_entrance_count)) {
+                                 g_goal_entrance_count,
+                                 path_cost_eff_costs(),
+                                 NULL,
+                                 0u)) {
         LOG_ERROR("path: failed to start entrance field build");
         path_shutdown();
         return false;
@@ -226,6 +235,7 @@ void path_shutdown(void) {
     path_debug_shutdown();
     path_sched_shutdown_state();
     path_fields_shutdown_storage();
+    path_cost_shutdown();
     clear_core_storage();
     g_path_initialized = false;
 }
@@ -249,6 +259,17 @@ void path_update(const HexWorld *world, const Params *params, float dt_sec) {
             if (!path_debug_build_overlay(g_world, PATH_GOAL_ENTRANCE, next, tile_count)) {
                 path_debug_reset_overlay();
             }
+        }
+        uint32_t stamp = path_sched_get_stamp(PATH_GOAL_ENTRANCE);
+        float build_ms = path_sched_get_last_build_ms(PATH_GOAL_ENTRANCE);
+        size_t relaxed = path_sched_get_last_relaxed(PATH_GOAL_ENTRANCE);
+        size_t dirty_processed = path_sched_get_dirty_processed_last_build(PATH_GOAL_ENTRANCE);
+        if (dirty_processed > 0u || build_ms > 0.0f) {
+            LOG_INFO("path: entrance swap stamp=%u build_ms=%.3f relaxed=%zu dirty=%zu",
+                     stamp,
+                     build_ms,
+                     relaxed,
+                     dirty_processed);
         }
     }
 }

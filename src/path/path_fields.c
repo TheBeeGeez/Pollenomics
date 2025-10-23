@@ -28,6 +28,9 @@ typedef struct PathFieldBuildState {
     const int32_t *neighbors;
     const TileId *goals;
     size_t goal_count;
+    const float *eff_cost;
+    const TileId *dirty_tiles;
+    size_t dirty_count;
     bool in_progress;
 } PathFieldBuildState;
 
@@ -214,7 +217,10 @@ bool path_fields_start_build(PathGoal goal,
                              const HexWorld *world,
                              const int32_t *neighbors,
                              const TileId *goals,
-                             size_t goal_count) {
+                             size_t goal_count,
+                             const float *eff_cost,
+                             const TileId *dirty_tiles,
+                             size_t dirty_count) {
     (void)world;
     if (goal != PATH_GOAL_ENTRANCE) {
         return false;
@@ -230,6 +236,9 @@ bool path_fields_start_build(PathGoal goal,
     build->neighbors = neighbors;
     build->goals = goals;
     build->goal_count = goal_count;
+    build->eff_cost = eff_cost;
+    build->dirty_tiles = dirty_tiles;
+    build->dirty_count = dirty_count;
     build->dist = g_field_state.dist[g_field_state.build_index];
     build->next = g_field_state.next[g_field_state.build_index];
     if (!build->dist || !build->next) {
@@ -256,6 +265,30 @@ bool path_fields_start_build(PathGoal goal,
             LOG_ERROR("path: failed to seed entrance heap");
             heap_clear(&build->heap);
             return false;
+        }
+    }
+    if (dirty_tiles && dirty_count > 0u) {
+        const float *active_dist = g_field_state.dist[g_field_state.active_index];
+        const uint8_t *active_next = g_field_state.next[g_field_state.active_index];
+        for (size_t i = 0; i < dirty_count; ++i) {
+            TileId nid = dirty_tiles[i];
+            if ((size_t)nid >= tile_count) {
+                continue;
+            }
+            if (build->dist[nid] == 0.0f) {
+                continue;
+            }
+            float seed_dist = (active_dist && (size_t)nid < tile_count) ? active_dist[nid] : kInf;
+            uint8_t seed_next = (active_next && (size_t)nid < tile_count) ? active_next[nid] : 255u;
+            if (seed_dist < kInf) {
+                build->dist[nid] = seed_dist;
+                build->next[nid] = seed_next;
+                if (!heap_push(&build->heap, nid, seed_dist)) {
+                    LOG_ERROR("path: failed to push dirty seed during entrance build");
+                    path_fields_cancel_build(goal);
+                    return false;
+                }
+            }
         }
     }
     if (build->heap.size == 0u) {
@@ -318,7 +351,14 @@ bool path_fields_step(PathGoal goal,
                 continue;
             }
             size_t v = (size_t)neighbor;
-            float alt = current.dist + 1.0f;
+            float tile_cost = 1.0f;
+            if (build->eff_cost && v < tile_count) {
+                tile_cost = build->eff_cost[v];
+            }
+            if (tile_cost < 0.0f) {
+                tile_cost = 0.0f;
+            }
+            float alt = current.dist + tile_cost;
             if (alt < build->dist[v]) {
                 build->dist[v] = alt;
                 build->next[v] = opposite_direction(dir);
@@ -380,6 +420,9 @@ void path_fields_cancel_build(PathGoal goal) {
     build->in_progress = false;
     build->dist = NULL;
     build->next = NULL;
+    build->eff_cost = NULL;
+    build->dirty_tiles = NULL;
+    build->dirty_count = 0u;
     heap_clear(&build->heap);
 }
 

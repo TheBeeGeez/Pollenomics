@@ -14,6 +14,7 @@ add_executable(bee_sim
   src/sim/bee_path.c
   src/sim/sim.c
   src/path/path_core.c
+  src/path/path_cost.c
   src/path/path_fields.c
   src/path/path_scheduler.c
   src/path/path_debug.c

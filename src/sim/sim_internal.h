@@ -77,6 +77,13 @@ typedef struct SimState {
     float bee_speed_mps;
     float bee_seek_accel;
     float bee_arrive_tol_world;
+    int32_t *bee_tile_index;
+    uint32_t *tile_crossings;
+    TileId *congestion_tiles;
+    float *congestion_rates;
+    size_t congestion_capacity;
+    size_t world_tile_count;
+    double congestion_accum_sec;
 } SimState;
 
 static inline float clampf(float v, float lo, float hi) {
