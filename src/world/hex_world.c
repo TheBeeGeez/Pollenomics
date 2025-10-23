@@ -1058,6 +1058,14 @@ float hex_world_hive_total_pollen(const HexWorld *world) {
     return world->hive_system->pollen_total_uL;
 }
 
+bool hex_world_hive_exists(const HexWorld *world) {
+    return world && world->hive_system;
+}
+
+bool hex_world_hive_enabled(const HexWorld *world) {
+    return world && world->hive_system && world->hive_system->enabled;
+}
+
 bool hex_world_hive_center(const HexWorld *world, float *out_x, float *out_y) {
     if (!world || !world->hive_system || !world->hive_system->enabled) {
         return false;

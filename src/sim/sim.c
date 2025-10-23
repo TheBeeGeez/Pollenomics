@@ -147,8 +147,7 @@ static void sim_tile_center(const SimState *state, size_t index, float *out_x, f
 }
 
 static bool sim_hive_exists(const SimState *state) {
-    return state && state->hex_world && state->hex_world->hive_system &&
-           state->hex_world->hive_system->enabled;
+    return state && state->hex_world && hex_world_hive_enabled(state->hex_world);
 }
 
 static bool sim_point_inside_hive(const SimState *state, float x, float y) {

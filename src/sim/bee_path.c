@@ -68,8 +68,7 @@ static bool bee_path_segments_intersect(float ax,
 }
 
 static bool bee_path_hive_exists(const SimState *state) {
-    return state && state->hex_world && state->hex_world->hive_system &&
-           state->hex_world->hive_system->enabled;
+    return state && state->hex_world && hex_world_hive_enabled(state->hex_world);
 }
 
 static bool bee_path_point_inside_hive(const SimState *state, float x, float y) {

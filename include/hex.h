@@ -117,6 +117,8 @@ float hex_world_hive_deposit_at_tile(HexWorld *world, size_t index, float reques
 float hex_world_hive_deposit_world(HexWorld *world, float world_x, float world_y, float request_uL);
 float hex_world_hive_total_honey(const HexWorld *world);
 float hex_world_hive_total_pollen(const HexWorld *world);
+bool hex_world_hive_exists(const HexWorld *world);
+bool hex_world_hive_enabled(const HexWorld *world);
 bool hex_world_hive_center(const HexWorld *world, float *out_x, float *out_y);
 bool hex_world_hive_preferred_unload(const HexWorld *world, float *out_x, float *out_y);
 bool hex_world_hive_preferred_entrance(const HexWorld *world, float *out_x, float *out_y);

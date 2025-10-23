@@ -41,6 +41,7 @@ static bool ui_rect_contains(const UiRect *rect, float px, float py);
 static size_t ui_add_rect(float x, float y, float w, float h, UiColor color);
 static float ui_measure_text(const char *text);
 static void ui_draw_text(float x, float y, const char *text, UiColor color);
+static void ui_world_to_screen(float wx, float wy, float *sx, float *sy);
 
 static float ui_clampf(float v, float lo, float hi) {
     if (v < lo) {
