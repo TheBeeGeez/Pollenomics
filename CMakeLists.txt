@@ -12,7 +12,6 @@ add_executable(bee_sim
   src/config/params.c
   src/sim/bee.c
   src/sim/bee_path.c
-  src/sim/hive.c
   src/sim/sim.c
   src/world/hex_world.c
   src/world/tiles/tile_core.c

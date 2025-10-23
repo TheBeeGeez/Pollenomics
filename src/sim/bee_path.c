@@ -3,7 +3,6 @@
 #include <float.h>
 #include <math.h>
 
-#include "hive.h"
 #include "sim_internal.h"
 
 #ifndef M_PI
@@ -68,15 +67,25 @@ static bool bee_path_segments_intersect(float ax,
     return true;
 }
 
+static bool bee_path_hive_exists(const SimState *state) {
+    return state && state->hex_world && state->hex_world->hive_system &&
+           state->hex_world->hive_system->enabled;
+}
+
 static bool bee_path_point_inside_hive(const SimState *state, float x, float y) {
-    if (!state || !state->hive_enabled) {
+    if (!bee_path_hive_exists(state)) {
         return false;
     }
-    const float eps = 1e-3f;
-    return (x >= state->hive_rect_x - eps &&
-            x <= state->hive_rect_x + state->hive_rect_w + eps &&
-            y >= state->hive_rect_y - eps &&
-            y <= state->hive_rect_y + state->hive_rect_h + eps);
+    size_t index = (size_t)SIZE_MAX;
+    if (!hex_world_tile_from_world(state->hex_world, x, y, &index)) {
+        return false;
+    }
+    if (index >= state->hex_world->tile_count) {
+        return false;
+    }
+    HexTerrain terrain = state->hex_world->tiles[index].terrain;
+    return (terrain == HEX_TERRAIN_HIVE_INTERIOR || terrain == HEX_TERRAIN_HIVE_STORAGE ||
+            terrain == HEX_TERRAIN_HIVE_ENTRANCE);
 }
 
 static bool bee_path_point_inside_world(const SimState *state, float x, float y, float radius) {
@@ -95,13 +104,19 @@ static bool bee_path_point_inside_world(const SimState *state, float x, float y,
 }
 
 static bool bee_path_segment_hits_hive(const SimState *state, float ax, float ay, float bx, float by) {
-    if (!state || !state->hive_enabled || state->hive_segment_count == 0) {
+    if (!bee_path_hive_exists(state)) {
         return false;
     }
-    for (size_t i = 0; i < state->hive_segment_count; ++i) {
-        const HiveSegment *seg = &state->hive_segments[i];
-        if (bee_path_segments_intersect(ax, ay, bx, by, seg->ax, seg->ay, seg->bx, seg->by)) {
-            return true;
+    const int samples = 24;
+    for (int i = 1; i <= samples; ++i) {
+        float t = (float)i / (float)samples;
+        float px = ax + (bx - ax) * t;
+        float py = ay + (by - ay) * t;
+        size_t index = (size_t)SIZE_MAX;
+        if (hex_world_tile_from_world(state->hex_world, px, py, &index)) {
+            if (!hex_world_tile_passable(state->hex_world, index)) {
+                return true;
+            }
         }
     }
     return false;
@@ -165,16 +180,20 @@ bool bee_path_plan(const SimState *state,
 
     float entrance_x = target_x;
     float entrance_y = target_y;
-    if (state->hive_enabled) {
-        float unload_x = entrance_x;
-        float unload_y = entrance_y;
-        hive_compute_points(state, &entrance_x, &entrance_y, &unload_x, &unload_y);
+    if (state->hex_world) {
+        float center_x = entrance_x;
+        float center_y = entrance_y;
+        hex_world_hive_center(state->hex_world, &center_x, &center_y);
+        if (!hex_world_hive_preferred_entrance(state->hex_world, &entrance_x, &entrance_y)) {
+            entrance_x = center_x;
+            entrance_y = center_y;
+        }
     }
 
     float plan_target_x = target_x;
     float plan_target_y = target_y;
     uint8_t plan_uses_entrance = 0;
-    if (state->hive_enabled && inside_now != target_inside) {
+    if (bee_path_hive_exists(state) && inside_now != target_inside) {
         plan_target_x = entrance_x;
         plan_target_y = entrance_y;
         plan_uses_entrance = 1;

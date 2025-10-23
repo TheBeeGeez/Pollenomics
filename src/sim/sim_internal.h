@@ -14,15 +14,6 @@
 
 #define TWO_PI (2.0f * (float)M_PI)
 
-typedef struct HiveSegment {
-    float ax;
-    float ay;
-    float bx;
-    float by;
-    float nx;
-    float ny;
-} HiveSegment;
-
 typedef struct SimState {
     size_t count;
     size_t capacity;
@@ -72,21 +63,6 @@ typedef struct SimState {
     double log_speed_sum;
     double log_speed_min;
     double log_speed_max;
-
-    int hive_enabled;
-    float hive_rect_x;
-    float hive_rect_y;
-    float hive_rect_w;
-    float hive_rect_h;
-    int hive_entrance_side;
-    float hive_entrance_t;
-    float hive_entrance_width;
-    float hive_restitution;
-    float hive_tangent_damp;
-    int hive_max_iters;
-    float hive_safety_margin;
-    HiveSegment hive_segments[8];
-    size_t hive_segment_count;
 
     HexWorld *hex_world;
     size_t *floral_tile_indices;

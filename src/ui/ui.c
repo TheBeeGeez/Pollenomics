@@ -52,6 +52,110 @@ static float ui_clampf(float v, float lo, float hi) {
     return v;
 }
 
+static void ui_hex_world_to_axial_params(const Params *p, float wx, float wy, float *out_q, float *out_r) {
+    if (!p || p->hex.cell_radius <= 0.0f) {
+        if (out_q) *out_q = 0.0f;
+        if (out_r) *out_r = 0.0f;
+        return;
+    }
+    float dx = wx - p->hex.origin_x;
+    float dy = wy - p->hex.origin_y;
+    float inv_radius = 1.0f / p->hex.cell_radius;
+    float sqrt3 = sqrtf(3.0f);
+    float q = (sqrt3 / 3.0f * dx - dy / 3.0f) * inv_radius;
+    float r = (2.0f / 3.0f * dy) * inv_radius;
+    if (out_q) *out_q = q;
+    if (out_r) *out_r = r;
+}
+
+static void ui_hex_axial_round_params(float qf, float rf, int *out_q, int *out_r) {
+    float sf = -qf - rf;
+    int rq = (int)roundf(qf);
+    int rr = (int)roundf(rf);
+    int rs = (int)roundf(sf);
+
+    float q_diff = fabsf((float)rq - qf);
+    float r_diff = fabsf((float)rr - rf);
+    float s_diff = fabsf((float)rs - sf);
+
+    if (q_diff > r_diff && q_diff > s_diff) {
+        rq = -rr - rs;
+    } else if (r_diff > s_diff) {
+        rr = -rq - rs;
+    } else {
+        rs = -rq - rr;
+    }
+
+    if (out_q) *out_q = rq;
+    if (out_r) *out_r = rr;
+}
+
+static void ui_hex_axial_to_world_params(const Params *p, int q, int r, float *out_x, float *out_y) {
+    if (!p) {
+        if (out_x) *out_x = 0.0f;
+        if (out_y) *out_y = 0.0f;
+        return;
+    }
+    float fq = (float)q;
+    float fr = (float)r;
+    float sqrt3 = sqrtf(3.0f);
+    float cx = p->hex.origin_x + p->hex.cell_radius * sqrt3 * (fq + fr * 0.5f);
+    float cy = p->hex.origin_y + p->hex.cell_radius * 1.5f * fr;
+    if (out_x) *out_x = cx;
+    if (out_y) *out_y = cy;
+}
+
+static int ui_hex_distance_axial(int q1, int r1, int q2, int r2) {
+    int dq = q1 - q2;
+    int dr = r1 - r2;
+    int ds = -dq - dr;
+    if (dq < 0) dq = -dq;
+    if (dr < 0) dr = -dr;
+    if (ds < 0) ds = -ds;
+    int max = dq;
+    if (dr > max) max = dr;
+    if (ds > max) max = ds;
+    return max;
+}
+
+static const int UI_HIVE_DIR_Q[6] = {0, 1, 1, 0, -1, -1};
+static const int UI_HIVE_DIR_R[6] = {-1, -1, 0, 1, 1, 0};
+
+static void ui_draw_hive_tile_rect(float cx, float cy, float cell_radius, UiColor color) {
+    float sx = 0.0f;
+    float sy = 0.0f;
+    ui_world_to_screen(cx, cy, &sx, &sy);
+    float sx_right = 0.0f;
+    float sy_right = 0.0f;
+    ui_world_to_screen(cx + cell_radius * 0.8f, cy, &sx_right, &sy_right);
+    float sx_up = 0.0f;
+    float sy_up = 0.0f;
+    ui_world_to_screen(cx, cy + cell_radius * 0.8f, &sx_up, &sy_up);
+    float half_w = fabsf(sx_right - sx);
+    float half_h = fabsf(sy_up - sy);
+    float width = fmaxf(4.0f, half_w * 2.0f);
+    float height = fmaxf(4.0f, half_h * 2.0f);
+    ui_add_rect(sx - width * 0.5f, sy - height * 0.5f, width, height, color);
+}
+
+typedef struct UiHiveWallCandidate {
+    float cx;
+    float cy;
+    float score;
+} UiHiveWallCandidate;
+
+static int ui_compare_wall_candidate(const void *lhs, const void *rhs) {
+    const UiHiveWallCandidate *a = (const UiHiveWallCandidate *)lhs;
+    const UiHiveWallCandidate *b = (const UiHiveWallCandidate *)rhs;
+    if (b->score > a->score) return 1;
+    if (b->score < a->score) return -1;
+    if (b->cx > a->cx) return 1;
+    if (b->cx < a->cx) return -1;
+    if (b->cy > a->cy) return 1;
+    if (b->cy < a->cy) return -1;
+    return 0;
+}
+
 typedef struct {
     float x, y;
     float r, g, b, a;
@@ -406,38 +510,6 @@ static void ui_world_to_screen(float wx, float wy, float *sx, float *sy) {
     *sy = (wy - cy) * zoom + 0.5f * (float)g_ui.fb_height;
 }
 
-static void ui_draw_hive_segment_horizontal(float ax, float bx, float y_world, UiColor color, float thickness) {
-    if (fabsf(bx - ax) < 1e-4f) {
-        return;
-    }
-    float sx0, sy0, sx1, sy1;
-    ui_world_to_screen(ax, y_world, &sx0, &sy0);
-    ui_world_to_screen(bx, y_world, &sx1, &sy1);
-    float width = fabsf(sx1 - sx0);
-    if (width < 1.0f) {
-        return;
-    }
-    float x = fminf(sx0, sx1);
-    float y = sy0 - 0.5f * thickness;
-    ui_add_rect(x, y, width, thickness, color);
-}
-
-static void ui_draw_hive_segment_vertical(float ay, float by, float x_world, UiColor color, float thickness) {
-    if (fabsf(by - ay) < 1e-4f) {
-        return;
-    }
-    float sx0, sy0, sx1, sy1;
-    ui_world_to_screen(x_world, ay, &sx0, &sy0);
-    ui_world_to_screen(x_world, by, &sx1, &sy1);
-    float height = fabsf(sy1 - sy0);
-    if (height < 1.0f) {
-        return;
-    }
-    float y = fminf(sy0, sy1);
-    float x = sx0 - 0.5f * thickness;
-    ui_add_rect(x, y, thickness, height, color);
-}
-
 static void ui_draw_hive_overlay(void) {
     if (!g_ui.show_hive_overlay || !g_ui.runtime || !g_ui.has_camera) {
         return;
@@ -446,94 +518,110 @@ static void ui_draw_hive_overlay(void) {
         return;
     }
     const Params *p = g_ui.runtime;
-    if (p->hive.rect_w <= 0.0f || p->hive.rect_h <= 0.0f) {
+    if (!p || p->hex.cell_radius <= 0.0f || p->hive.radius_tiles <= 0) {
         return;
     }
-
-    const float x = p->hive.rect_x;
-    const float y = p->hive.rect_y;
-    const float w = p->hive.rect_w;
-    const float h = p->hive.rect_h;
-
-    const int side = p->hive.entrance_side;
-    const float half_gap = p->hive.entrance_width * 0.5f;
-    float gap_min = 0.0f;
-    float gap_max = 0.0f;
-    if (side == 0 || side == 1) {
-        float gap_center = x + p->hive.entrance_t * w;
-        gap_min = fmaxf(x, gap_center - half_gap);
-        gap_max = fminf(x + w, gap_center + half_gap);
-    } else {
-        float gap_center = y + p->hive.entrance_t * h;
-        gap_min = fmaxf(y, gap_center - half_gap);
-        gap_max = fminf(y + h, gap_center + half_gap);
+    int radius = p->hive.radius_tiles;
+    int storage_radius = p->hive.storage_radius_tiles;
+    if (storage_radius < 0) {
+        storage_radius = 0;
+    }
+    if (radius <= 0) {
+        return;
+    }
+    if (storage_radius > radius - 1) {
+        storage_radius = radius - 1;
+        if (storage_radius < 0) {
+            storage_radius = 0;
+        }
+    }
+    int entrance_width = p->hive.entrance_width_tiles;
+    if (entrance_width <= 0) {
+        entrance_width = 1;
+    }
+    int entrance_dir = p->hive.entrance_dir;
+    if (entrance_dir < 0 || entrance_dir > 5) {
+        entrance_dir = 3;
     }
 
-    UiColor wall_color = ui_color_rgba(0.95f, 0.75f, 0.15f, 0.9f);
-    UiColor gap_color = ui_color_rgba(0.2f, 0.85f, 0.35f, 0.9f);
-    float thickness = fmaxf(2.0f, g_ui.cam_zoom * 0.8f);
+    float center_qf = 0.0f;
+    float center_rf = 0.0f;
+    ui_hex_world_to_axial_params(p, p->hive.center_x, p->hive.center_y, &center_qf, &center_rf);
+    int center_q = 0;
+    int center_r = 0;
+    ui_hex_axial_round_params(center_qf, center_rf, &center_q, &center_r);
 
-    // Top
-    if (side == 0) {
-        if (gap_min - x > 1e-4f) {
-            ui_draw_hive_segment_horizontal(x, gap_min, y, wall_color, thickness);
+    int entrance_center_q = center_q + UI_HIVE_DIR_Q[entrance_dir] * radius;
+    int entrance_center_r = center_r + UI_HIVE_DIR_R[entrance_dir] * radius;
+
+    float entrance_target_x = p->hive.center_x;
+    float entrance_target_y = p->hive.center_y;
+    ui_hex_axial_to_world_params(p, entrance_center_q, entrance_center_r, &entrance_target_x, &entrance_target_y);
+    float target_vx = entrance_target_x - p->hive.center_x;
+    float target_vy = entrance_target_y - p->hive.center_y;
+    float target_len = sqrtf(target_vx * target_vx + target_vy * target_vy);
+
+    size_t max_walls = (size_t)(radius * 6 + 6);
+    UiHiveWallCandidate *walls = NULL;
+    if (max_walls > 0) {
+        walls = (UiHiveWallCandidate *)malloc(max_walls * sizeof(UiHiveWallCandidate));
+    }
+    size_t wall_count = 0;
+
+    UiColor interior_color = ui_color_rgba(0.93f, 0.85f, 0.58f, 0.55f);
+    UiColor storage_color = ui_color_rgba(0.98f, 0.74f, 0.18f, 0.72f);
+    UiColor wall_color = ui_color_rgba(0.36f, 0.22f, 0.10f, 0.82f);
+    UiColor entrance_color = ui_color_rgba(0.18f, 0.78f, 0.82f, 0.85f);
+
+    for (int r = center_r - radius; r <= center_r + radius; ++r) {
+        for (int q = center_q - radius; q <= center_q + radius; ++q) {
+            int dist = ui_hex_distance_axial(q, r, center_q, center_r);
+            if (dist > radius) {
+                continue;
+            }
+            float cx = 0.0f;
+            float cy = 0.0f;
+            ui_hex_axial_to_world_params(p, q, r, &cx, &cy);
+            if (dist < radius) {
+                if (dist <= storage_radius) {
+                    ui_draw_hive_tile_rect(cx, cy, p->hex.cell_radius, storage_color);
+                } else {
+                    ui_draw_hive_tile_rect(cx, cy, p->hex.cell_radius, interior_color);
+                }
+            } else if (dist == radius) {
+                if (walls && wall_count < max_walls) {
+                    float vx = cx - p->hive.center_x;
+                    float vy = cy - p->hive.center_y;
+                    float len = sqrtf(vx * vx + vy * vy);
+                    float dot = 0.0f;
+                    if (len > 1e-5f && target_len > 1e-5f) {
+                        dot = (vx * target_vx + vy * target_vy) / (len * target_len);
+                    }
+                    int dist_to_target = ui_hex_distance_axial(q, r, entrance_center_q, entrance_center_r);
+                    float score = -(float)dist_to_target + dot * 0.001f;
+                    walls[wall_count++] = (UiHiveWallCandidate){cx, cy, score};
+                } else {
+                    ui_draw_hive_tile_rect(cx, cy, p->hex.cell_radius, wall_color);
+                }
+            }
         }
-        if (x + w - gap_max > 1e-4f) {
-            ui_draw_hive_segment_horizontal(gap_max, x + w, y, wall_color, thickness);
-        }
-        if (gap_max > gap_min) {
-            ui_draw_hive_segment_horizontal(gap_min, gap_max, y, gap_color, thickness);
-        }
-    } else {
-        ui_draw_hive_segment_horizontal(x, x + w, y, wall_color, thickness);
     }
 
-    // Bottom
-    float y_bottom = y + h;
-    if (side == 1) {
-        if (gap_min - x > 1e-4f) {
-            ui_draw_hive_segment_horizontal(x, gap_min, y_bottom, wall_color, thickness);
+    if (walls && wall_count > 0) {
+        if (entrance_width > (int)wall_count) {
+            entrance_width = (int)wall_count;
         }
-        if (x + w - gap_max > 1e-4f) {
-            ui_draw_hive_segment_horizontal(gap_max, x + w, y_bottom, wall_color, thickness);
+        if (entrance_width <= 0) {
+            entrance_width = 1;
         }
-        if (gap_max > gap_min) {
-            ui_draw_hive_segment_horizontal(gap_min, gap_max, y_bottom, gap_color, thickness);
+        qsort(walls, wall_count, sizeof(UiHiveWallCandidate), ui_compare_wall_candidate);
+        for (size_t i = 0; i < wall_count; ++i) {
+            UiColor color = (i < (size_t)entrance_width) ? entrance_color : wall_color;
+            ui_draw_hive_tile_rect(walls[i].cx, walls[i].cy, p->hex.cell_radius, color);
         }
-    } else {
-        ui_draw_hive_segment_horizontal(x, x + w, y_bottom, wall_color, thickness);
     }
 
-    // Left
-    if (side == 2) {
-        if (gap_min - y > 1e-4f) {
-            ui_draw_hive_segment_vertical(y, gap_min, x, wall_color, thickness);
-        }
-        if (y + h - gap_max > 1e-4f) {
-            ui_draw_hive_segment_vertical(gap_max, y + h, x, wall_color, thickness);
-        }
-        if (gap_max > gap_min) {
-            ui_draw_hive_segment_vertical(gap_min, gap_max, x, gap_color, thickness);
-        }
-    } else {
-        ui_draw_hive_segment_vertical(y, y + h, x, wall_color, thickness);
-    }
-
-    // Right
-    float x_right = x + w;
-    if (side == 3) {
-        if (gap_min - y > 1e-4f) {
-            ui_draw_hive_segment_vertical(y, gap_min, x_right, wall_color, thickness);
-        }
-        if (y + h - gap_max > 1e-4f) {
-            ui_draw_hive_segment_vertical(gap_max, y + h, x_right, wall_color, thickness);
-        }
-        if (gap_max > gap_min) {
-            ui_draw_hive_segment_vertical(gap_min, gap_max, x_right, gap_color, thickness);
-        }
-    } else {
-        ui_draw_hive_segment_vertical(y, y + h, x_right, wall_color, thickness);
-    }
+    free(walls);
 }
 
 void ui_set_viewport(const RenderCamera *camera, int framebuffer_width, int framebuffer_height) {
@@ -804,9 +892,11 @@ static const char *ui_hex_terrain_name(HexTerrain terrain) {
         case HEX_TERRAIN_FOREST: return "FOREST";
         case HEX_TERRAIN_MOUNTAIN: return "MOUNTAIN";
         case HEX_TERRAIN_WATER: return "WATER";
-        case HEX_TERRAIN_HIVE: return "HIVE";
+        case HEX_TERRAIN_HIVE_INTERIOR: return "HIVE INTERIOR";
+        case HEX_TERRAIN_HIVE_STORAGE: return "HIVE STORAGE";
+        case HEX_TERRAIN_HIVE_WALL: return "HIVE WALL";
+        case HEX_TERRAIN_HIVE_ENTRANCE: return "HIVE ENTRANCE";
         case HEX_TERRAIN_FLOWERS: return "FLOWERS";
-        case HEX_TERRAIN_ENTRANCE: return "ENTRANCE";
         default: return "UNKNOWN";
     }
 }
@@ -860,6 +950,9 @@ static void ui_draw_selected_hex_panel(void) {
     snprintf(line, sizeof(line), "TERRAIN %s", ui_hex_terrain_name(info->terrain));
     HEX_ADD_LINE(line, text_color, 18.0f);
 
+    bool is_hive_tile = (info->terrain == HEX_TERRAIN_HIVE_INTERIOR || info->terrain == HEX_TERRAIN_HIVE_STORAGE ||
+                         info->terrain == HEX_TERRAIN_HIVE_WALL || info->terrain == HEX_TERRAIN_HIVE_ENTRANCE);
+
     if (info->terrain == HEX_TERRAIN_FLOWERS) {
         if (info->flower_archetype_name && info->flower_archetype_name[0] != '\0') {
             snprintf(line, sizeof(line), "ARCHETYPE %s", info->flower_archetype_name);
@@ -886,6 +979,23 @@ static void ui_draw_selected_hex_panel(void) {
 
         snprintf(line, sizeof(line), "VISCOSITY %.2F", info->flower_viscosity);
         HEX_ADD_LINE(line, text_color, 18.0f);
+    } else if (is_hive_tile) {
+        const char *passable = info->hive_passable ? "YES" : "NO";
+        snprintf(line, sizeof(line), "HIVE PASSABLE %s", passable);
+        HEX_ADD_LINE(line, text_color, 18.0f);
+
+        if (info->hive_allows_deposit) {
+            snprintf(line, sizeof(line), "HONEY %.1F / %.1F UL", info->hive_honey_stock, info->hive_honey_capacity);
+            HEX_ADD_LINE(line, text_color, 18.0f);
+        } else {
+            HEX_ADD_LINE("NO STORAGE CAPACITY", ui_color_rgba(0.6f, 0.65f, 0.7f, 1.0f), 18.0f);
+        }
+
+        snprintf(line, sizeof(line), "BASE COST %.2F", info->hive_base_cost);
+        HEX_ADD_LINE(line, text_color, 18.0f);
+
+        snprintf(line, sizeof(line), "COLONY HONEY %.1F UL", info->hive_total_honey);
+        HEX_ADD_LINE(line, accent, 18.0f);
     } else {
         HEX_ADD_LINE("NO FLORAL DATA", ui_color_rgba(0.6f, 0.65f, 0.7f, 1.0f), 18.0f);
     }
