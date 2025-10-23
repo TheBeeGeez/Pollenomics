@@ -2,6 +2,7 @@
 
 #include <glad/glad.h>
 
+#include <math.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -35,7 +36,7 @@ typedef struct RenderState {
     GLuint program;
     GLuint vao;
     GLuint quad_vbo;
-   GLuint instance_vbo;
+    GLuint instance_vbo;
     GLint u_screen;
     GLint u_cam_center;
     GLint u_cam_zoom;
@@ -53,6 +54,16 @@ typedef struct RenderState {
     size_t line_capacity;
     size_t line_buffer_size;
     float *line_cpu_buffer;
+    GLuint hex_program;
+    GLuint hex_vao;
+    GLuint hex_vertex_vbo;
+    GLuint hex_instance_vbo;
+    GLint hex_u_screen;
+    GLint hex_u_cam_center;
+    GLint hex_u_cam_zoom;
+    size_t hex_instance_capacity;
+    size_t hex_instance_buffer_size;
+    unsigned char *hex_instance_cpu_buffer;
 } RenderState;
 
 static void destroy_render_state(RenderState *state) {
@@ -80,8 +91,21 @@ static void destroy_render_state(RenderState *state) {
     if (state->line_vbo) {
         glDeleteBuffers(1, &state->line_vbo);
     }
+    if (state->hex_program) {
+        glDeleteProgram(state->hex_program);
+    }
+    if (state->hex_vao) {
+        glDeleteVertexArrays(1, &state->hex_vao);
+    }
+    if (state->hex_vertex_vbo) {
+        glDeleteBuffers(1, &state->hex_vertex_vbo);
+    }
+    if (state->hex_instance_vbo) {
+        glDeleteBuffers(1, &state->hex_instance_vbo);
+    }
     free(state->instance_cpu_buffer);
     free(state->line_cpu_buffer);
+    free(state->hex_instance_cpu_buffer);
     free(state);
 }
 
@@ -165,6 +189,34 @@ static const char *kFragmentShaderSrc =
     "    frag = vec4(v_color_rgba.rgb, v_color_rgba.a * alpha);\n"
     "}\n";
 
+static const char *kHexVertexShaderSrc =
+    "#version 330 core\n"
+    "layout(location=0) in vec2 a_pos_unit;\n"
+    "layout(location=1) in vec2 a_center_world;\n"
+    "layout(location=2) in float a_scale_world;\n"
+    "layout(location=3) in vec4 a_color_rgba;\n"
+    "uniform vec2 u_screen;\n"
+    "uniform vec2 u_cam_center;\n"
+    "uniform float u_cam_zoom;\n"
+    "out vec4 v_color_rgba;\n"
+    "void main() {\n"
+    "    vec2 world_pos = a_center_world + a_pos_unit * a_scale_world;\n"
+    "    vec2 px = (world_pos - u_cam_center) * u_cam_zoom + 0.5 * u_screen;\n"
+    "    vec2 ndc;\n"
+    "    ndc.x = (px.x / u_screen.x) * 2.0 - 1.0;\n"
+    "    ndc.y = 1.0 - (px.y / u_screen.y) * 2.0;\n"
+    "    gl_Position = vec4(ndc, 0.0, 1.0);\n"
+    "    v_color_rgba = a_color_rgba;\n"
+    "}\n";
+
+static const char *kHexFragmentShaderSrc =
+    "#version 330 core\n"
+    "in vec4 v_color_rgba;\n"
+    "out vec4 frag_color;\n"
+    "void main() {\n"
+    "    frag_color = v_color_rgba;\n"
+    "}\n";
+
 static const char *kLineVertexShaderSrc =
     "#version 330 core\n"
     "layout(location=0) in vec2 a_pos_world;\n"
@@ -231,6 +283,29 @@ static void configure_line_attribs(RenderState *state) {
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, LINE_VERTEX_STRIDE, (void *)offsetof(LineVertex, pos));
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, LINE_VERTEX_STRIDE, (void *)offsetof(LineVertex, color));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+static void configure_hex_attribs(RenderState *state) {
+    glBindVertexArray(state->hex_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, state->hex_vertex_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void *)0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, state->hex_instance_vbo);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, INSTANCE_STRIDE, (void *)0);
+    glVertexAttribDivisor(1, 1);
+
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, INSTANCE_STRIDE, (void *)(sizeof(float) * 2));
+    glVertexAttribDivisor(2, 1);
+
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, INSTANCE_STRIDE, (void *)(sizeof(float) * 3));
+    glVertexAttribDivisor(3, 1);
+
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
@@ -368,6 +443,120 @@ static void pack_instance_batch(RenderState *state,
     }
 }
 
+static bool ensure_hex_instance_capacity(RenderState *state, size_t desired_count) {
+    if (desired_count == 0) {
+        return true;
+    }
+    if (desired_count <= state->hex_instance_capacity) {
+        return true;
+    }
+
+    size_t old_capacity = state->hex_instance_capacity;
+    size_t new_capacity = old_capacity ? old_capacity : 256;
+    while (new_capacity < desired_count) {
+        if (new_capacity > (SIZE_MAX / 2)) {
+            LOG_ERROR("render: hex instance capacity overflow (requested %zu)", desired_count);
+            return false;
+        }
+        new_capacity *= 2;
+    }
+
+    size_t new_bytes = new_capacity * (size_t)INSTANCE_STRIDE;
+    unsigned char *cpu_buffer =
+        (unsigned char *)realloc(state->hex_instance_cpu_buffer, new_bytes);
+    if (!cpu_buffer) {
+        LOG_ERROR("render: failed to resize hex instance CPU buffer to %zu bytes", new_bytes);
+        return false;
+    }
+    state->hex_instance_cpu_buffer = cpu_buffer;
+    state->hex_instance_capacity = new_capacity;
+    state->hex_instance_buffer_size = new_bytes;
+
+    glBindBuffer(GL_ARRAY_BUFFER, state->hex_instance_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)new_bytes, NULL, GL_STREAM_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    configure_hex_attribs(state);
+
+    LOG_INFO("render: hex instance buffer grow old=%zu new=%zu bytes=%zu",
+             old_capacity,
+             new_capacity,
+             new_bytes);
+    return true;
+}
+
+static void pack_hex_instances(RenderState *state, const RenderHexView *hex) {
+    if (!state || !hex || !state->hex_instance_cpu_buffer || hex->count == 0) {
+        return;
+    }
+    InstanceAttrib *attribs = (InstanceAttrib *)state->hex_instance_cpu_buffer;
+    const float *centers = hex->centers_world_xy;
+    const float *scales = hex->scale_world;
+    const uint32_t *colors = hex->fill_rgba;
+    const float fallback_scale = (hex->uniform_scale_world > 0.0f) ? hex->uniform_scale_world : 1.0f;
+    size_t highlight_index = hex->highlight_enabled ? hex->highlight_index : (size_t)SIZE_MAX;
+    uint32_t highlight_color = hex->highlight_fill_rgba;
+
+    for (size_t i = 0; i < hex->count; ++i) {
+        float cx = centers ? centers[i * 2 + 0] : 0.0f;
+        float cy = centers ? centers[i * 2 + 1] : 0.0f;
+        float scale = scales ? scales[i] : fallback_scale;
+        if (scale <= 0.0f) {
+            scale = fallback_scale;
+        }
+
+        uint32_t packed = colors ? colors[i] : 0xFFFFFFFFu;
+        if (hex->highlight_enabled && i == highlight_index) {
+            packed = highlight_color;
+        }
+        unsigned char r = (unsigned char)((packed >> 24) & 0xFFu);
+        unsigned char g = (unsigned char)((packed >> 16) & 0xFFu);
+        unsigned char b = (unsigned char)((packed >> 8) & 0xFFu);
+        unsigned char a = (unsigned char)(packed & 0xFFu);
+
+        attribs[i].center[0] = cx;
+        attribs[i].center[1] = cy;
+        attribs[i].radius = scale;
+        attribs[i].color[0] = r;
+        attribs[i].color[1] = g;
+        attribs[i].color[2] = b;
+        attribs[i].color[3] = a;
+    }
+}
+
+static void render_draw_hexes(RenderState *state,
+                              const RenderHexView *hex,
+                              float cam_center_x,
+                              float cam_center_y,
+                              float cam_zoom) {
+    if (!state || !hex || !hex->visible || hex->count == 0) {
+        return;
+    }
+    if (!state->hex_program || !state->hex_vao || !state->hex_instance_vbo) {
+        return;
+    }
+    if (!ensure_hex_instance_capacity(state, hex->count)) {
+        return;
+    }
+    pack_hex_instances(state, hex);
+
+    size_t byte_count = hex->count * (size_t)INSTANCE_STRIDE;
+    glBindBuffer(GL_ARRAY_BUFFER, state->hex_instance_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)state->hex_instance_buffer_size, NULL, GL_STREAM_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)byte_count, state->hex_instance_cpu_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    float zoom = cam_zoom > 0.0f ? cam_zoom : 1.0f;
+
+    glUseProgram(state->hex_program);
+    glUniform2f(state->hex_u_screen, (float)state->fb_width, (float)state->fb_height);
+    glUniform2f(state->hex_u_cam_center, cam_center_x, cam_center_y);
+    glUniform1f(state->hex_u_cam_zoom, zoom);
+    glBindVertexArray(state->hex_vao);
+    glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 8, (GLsizei)hex->count);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
 bool render_init(Render *render, const Params *params) {
     if (!render || !params) {
         LOG_ERROR("render_init received null argument");
@@ -418,6 +607,9 @@ bool render_init(Render *render, const Params *params) {
     glGenVertexArrays(1, &state->vao);
     glGenBuffers(1, &state->quad_vbo);
     glGenBuffers(1, &state->instance_vbo);
+    glGenVertexArrays(1, &state->hex_vao);
+    glGenBuffers(1, &state->hex_vertex_vbo);
+    glGenBuffers(1, &state->hex_instance_vbo);
     glGenVertexArrays(1, &state->line_vao);
     glGenBuffers(1, &state->line_vbo);
 
@@ -432,6 +624,28 @@ bool render_init(Render *render, const Params *params) {
 
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glBindVertexArray(state->hex_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, state->hex_vertex_vbo);
+    float hex_vertices[16];
+    hex_vertices[0] = 0.0f;
+    hex_vertices[1] = 0.0f;
+    const float deg_to_rad = 0.01745329251994329577f;
+    for (int i = 0; i < 6; ++i) {
+        float angle_deg = 60.0f * (float)i - 30.0f;
+        float angle_rad = angle_deg * deg_to_rad;
+        hex_vertices[2 * (i + 1) + 0] = cosf(angle_rad);
+        hex_vertices[2 * (i + 1) + 1] = sinf(angle_rad);
+    }
+    hex_vertices[14] = hex_vertices[2];
+    hex_vertices[15] = hex_vertices[3];
+    glBufferData(GL_ARRAY_BUFFER, sizeof(hex_vertices), hex_vertices, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ARRAY_BUFFER, state->hex_instance_vbo);
+    glBufferData(GL_ARRAY_BUFFER, 0, NULL, GL_STREAM_DRAW);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    configure_hex_attribs(state);
 
     glBindVertexArray(state->line_vao);
     glBindBuffer(GL_ARRAY_BUFFER, state->line_vbo);
@@ -469,6 +683,36 @@ bool render_init(Render *render, const Params *params) {
     state->u_screen = glGetUniformLocation(state->program, "u_screen");
     state->u_cam_center = glGetUniformLocation(state->program, "u_cam_center");
     state->u_cam_zoom = glGetUniformLocation(state->program, "u_cam_zoom");
+    glUseProgram(0);
+
+    GLuint hex_vs = compile_shader(GL_VERTEX_SHADER, kHexVertexShaderSrc, log_buffer, sizeof(log_buffer));
+    if (!hex_vs) {
+        LOG_ERROR("Hex vertex shader compilation failed:\n%s", log_buffer);
+        destroy_render_state(state);
+        return false;
+    }
+
+    GLuint hex_fs = compile_shader(GL_FRAGMENT_SHADER, kHexFragmentShaderSrc, log_buffer, sizeof(log_buffer));
+    if (!hex_fs) {
+        LOG_ERROR("Hex fragment shader compilation failed:\n%s", log_buffer);
+        glDeleteShader(hex_vs);
+        destroy_render_state(state);
+        return false;
+    }
+
+    state->hex_program = link_program(hex_vs, hex_fs, log_buffer, sizeof(log_buffer));
+    glDeleteShader(hex_vs);
+    glDeleteShader(hex_fs);
+    if (!state->hex_program) {
+        LOG_ERROR("Hex shader program link failed:\n%s", log_buffer);
+        destroy_render_state(state);
+        return false;
+    }
+
+    glUseProgram(state->hex_program);
+    state->hex_u_screen = glGetUniformLocation(state->hex_program, "u_screen");
+    state->hex_u_cam_center = glGetUniformLocation(state->hex_program, "u_cam_center");
+    state->hex_u_cam_zoom = glGetUniformLocation(state->hex_program, "u_cam_zoom");
     glUseProgram(0);
 
     GLuint line_vs = compile_shader(GL_VERTEX_SHADER, kLineVertexShaderSrc, log_buffer, sizeof(log_buffer));
@@ -514,6 +758,7 @@ bool render_init(Render *render, const Params *params) {
 
     render->state = state;
     LOG_INFO("render: circle instancing enabled (stride=%d bytes)", INSTANCE_STRIDE);
+    LOG_INFO("render: hex instancing enabled");
     return true;
 }
 
@@ -584,6 +829,18 @@ void render_frame(Render *render, const RenderView *view) {
                  state->clear_color[3]);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    float cam_zoom = state->cam_zoom > 0.0f ? state->cam_zoom : 1.0f;
+    float cam_center_x = state->cam_center[0];
+    float cam_center_y = state->cam_center[1];
+
+    const RenderHexView *hex_view = view ? view->hex : NULL;
+    bool draw_hex_before = hex_view && hex_view->visible && !hex_view->draw_on_top;
+    bool draw_hex_after = hex_view && hex_view->visible && hex_view->draw_on_top;
+
+    if (draw_hex_before) {
+        render_draw_hexes(state, hex_view, cam_center_x, cam_center_y, cam_zoom);
+    }
+
     size_t bee_count = view ? view->count : 0;
     size_t patch_count = view ? view->patch_count : 0;
     const bool patch_data_valid = view && view->patch_positions_xy && view->patch_radii_px && view->patch_fill_rgba && view->patch_ring_radii_px && view->patch_ring_rgba;
@@ -591,55 +848,52 @@ void render_frame(Render *render, const RenderView *view) {
         patch_count = 0;
     }
     size_t total_instances = bee_count + (patch_count * 2);
-    if (!state->program || total_instances == 0) {
-        return;
+    if (state->program && total_instances > 0) {
+        if (ensure_instance_capacity(state, total_instances)) {
+            size_t offset = 0;
+            if (patch_count > 0) {
+                pack_instance_batch(state,
+                                    offset,
+                                    view->patch_positions_xy,
+                                    view->patch_radii_px,
+                                    view->patch_fill_rgba,
+                                    patch_count);
+                offset += patch_count;
+                pack_instance_batch(state,
+                                    offset,
+                                    view->patch_positions_xy,
+                                    view->patch_ring_radii_px,
+                                    view->patch_ring_rgba,
+                                    patch_count);
+                offset += patch_count;
+            }
+            pack_instance_batch(state,
+                                offset,
+                                view ? view->positions_xy : NULL,
+                                view ? view->radii_px : NULL,
+                                view ? view->color_rgba : NULL,
+                                bee_count);
+
+            size_t byte_count = total_instances * (size_t)INSTANCE_STRIDE;
+            glBindBuffer(GL_ARRAY_BUFFER, state->instance_vbo);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)state->instance_buffer_size, NULL, GL_STREAM_DRAW);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)byte_count, state->instance_cpu_buffer);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+            glUseProgram(state->program);
+            glUniform2f(state->u_screen, (float)state->fb_width, (float)state->fb_height);
+            glUniform2f(state->u_cam_center, cam_center_x, cam_center_y);
+            glUniform1f(state->u_cam_zoom, cam_zoom);
+            glBindVertexArray(state->vao);
+            glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)total_instances);
+            glBindVertexArray(0);
+            glUseProgram(0);
+        }
     }
 
-    if (!ensure_instance_capacity(state, total_instances)) {
-        return;
+    if (draw_hex_after) {
+        render_draw_hexes(state, hex_view, cam_center_x, cam_center_y, cam_zoom);
     }
-
-    size_t offset = 0;
-    if (patch_count > 0) {
-        pack_instance_batch(state,
-                            offset,
-                            view->patch_positions_xy,
-                            view->patch_radii_px,
-                            view->patch_fill_rgba,
-                            patch_count);
-        offset += patch_count;
-        pack_instance_batch(state,
-                            offset,
-                            view->patch_positions_xy,
-                            view->patch_ring_radii_px,
-                            view->patch_ring_rgba,
-                            patch_count);
-        offset += patch_count;
-    }
-    pack_instance_batch(state, offset, view ? view->positions_xy : NULL, view ? view->radii_px : NULL,
-                        view ? view->color_rgba : NULL, bee_count);
-
-    float cam_zoom = state->cam_zoom;
-    if (cam_zoom <= 0.0f) {
-        cam_zoom = 1.0f;
-    }
-    float cam_center_x = state->cam_center[0];
-    float cam_center_y = state->cam_center[1];
-
-    size_t byte_count = total_instances * (size_t)INSTANCE_STRIDE;
-    glBindBuffer(GL_ARRAY_BUFFER, state->instance_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)state->instance_buffer_size, NULL, GL_STREAM_DRAW);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)byte_count, state->instance_cpu_buffer);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    glUseProgram(state->program);
-    glUniform2f(state->u_screen, (float)state->fb_width, (float)state->fb_height);
-    glUniform2f(state->u_cam_center, cam_center_x, cam_center_y);
-    glUniform1f(state->u_cam_zoom, cam_zoom);
-    glBindVertexArray(state->vao);
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)total_instances);
-    glBindVertexArray(0);
-    glUseProgram(0);
 
     if (view && view->debug_line_count > 0 && view->debug_lines_xy && view->debug_line_rgba &&
         state->line_program && state->line_vao) {

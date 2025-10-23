@@ -2,6 +2,7 @@
 
 #include <glad/glad.h>
 
+#include "hex.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,6 +97,7 @@ typedef struct {
     GLint resolution_uniform;
 
     bool show_hive_overlay;
+    bool show_hex_grid;
     bool has_camera;
     float cam_center_x;
     float cam_center_y;
@@ -105,10 +107,15 @@ typedef struct {
     bool selected_valid;
     bool selected_panel_open;
     BeeDebugInfo selected_bee;
+    bool selected_hex_valid;
+    bool hex_panel_open;
+    HexTileDebugInfo selected_hex;
     float panel_scroll;
     float panel_content_height;
     float panel_visible_height;
     float panel_last_width;
+    bool hex_draw_on_top;
+    float info_panel_next_y;
 } UiState;
 
 static UiState g_ui;
@@ -139,6 +146,9 @@ static UiColor ui_color_rgba(float r, float g, float b, float a) {
 }
 
 static bool ui_range_intersects(float y, float h, float top, float bottom);
+static void ui_draw_selected_hex_panel(void);
+static void ui_draw_selection_panels(void);
+static const char *ui_hex_terrain_name(HexTerrain terrain);
 
 static float ui_draw_slider_group(const SliderSpec *sliders,
                                   size_t slider_count,
@@ -552,6 +562,17 @@ void ui_set_selected_bee(const BeeDebugInfo *info, bool valid) {
         g_ui.selected_panel_open = false;
     }
 }
+
+void ui_set_selected_hex(const HexTileDebugInfo *info, bool valid) {
+    if (valid && info) {
+        g_ui.selected_hex = *info;
+        g_ui.selected_hex_valid = true;
+        g_ui.hex_panel_open = true;
+    } else {
+        g_ui.selected_hex_valid = false;
+        g_ui.hex_panel_open = false;
+    }
+}
 #define GLYPH(ch, r0, r1, r2, r3, r4, r5, r6) \
     { ch, { r0, r1, r2, r3, r4, r5, r6 } }
 
@@ -756,7 +777,7 @@ static void ui_draw_selected_bee_panel(void) {
     }
 
     float panel_width = fmaxf(min_panel_width, max_width + padding * 2.0f);
-    float origin_y = UI_PANEL_MARGIN;
+    float origin_y = g_ui.info_panel_next_y;
     float origin_x = (float)g_ui.fb_width - panel_width - UI_PANEL_MARGIN;
     if (origin_x < UI_PANEL_MARGIN) {
         origin_x = UI_PANEL_MARGIN;
@@ -773,6 +794,115 @@ static void ui_draw_selected_bee_panel(void) {
 
     float panel_h = (cursor_y + 12.0f) - origin_y;
     ui_update_rect(bg_idx, origin_x, origin_y, panel_width, panel_h);
+    g_ui.info_panel_next_y = origin_y + panel_h + 12.0f;
+}
+
+static const char *ui_hex_terrain_name(HexTerrain terrain) {
+    switch (terrain) {
+        case HEX_TERRAIN_OPEN: return "OPEN";
+        case HEX_TERRAIN_FOREST: return "FOREST";
+        case HEX_TERRAIN_MOUNTAIN: return "MOUNTAIN";
+        case HEX_TERRAIN_WATER: return "WATER";
+        case HEX_TERRAIN_HIVE: return "HIVE";
+        case HEX_TERRAIN_FLOWERS: return "FLOWERS";
+        case HEX_TERRAIN_ENTRANCE: return "ENTRANCE";
+        default: return "UNKNOWN";
+    }
+}
+
+static void ui_draw_selected_hex_panel(void) {
+    if (!g_ui.hex_panel_open || !g_ui.selected_hex_valid) {
+        return;
+    }
+    if (g_ui.fb_width <= 0 || g_ui.fb_height <= 0) {
+        return;
+    }
+
+    typedef struct {
+        char text[128];
+        UiColor color;
+        float spacing_after;
+    } HexPanelLine;
+
+    HexPanelLine lines[10];
+    size_t line_count = 0;
+    const float padding = 16.0f;
+    const float min_panel_width = 220.0f;
+
+    UiColor bg = ui_color_rgba(0.10f, 0.10f, 0.14f, 0.94f);
+    UiColor header = ui_color_rgba(0.95f, 0.95f, 0.98f, 1.0f);
+    UiColor text_color = ui_color_rgba(0.85f, 0.88f, 0.92f, 1.0f);
+    UiColor accent = ui_color_rgba(0.30f, 0.65f, 0.95f, 1.0f);
+
+    const HexTileDebugInfo *info = &g_ui.selected_hex;
+    char line[128];
+
+#define HEX_ADD_LINE(TEXT_EXPR, COLOR_EXPR, SPACING_VALUE)                                \
+    do {                                                                                \
+        if (line_count < sizeof(lines) / sizeof(lines[0])) {                            \
+            strncpy(lines[line_count].text, (TEXT_EXPR), sizeof(lines[line_count].text) - 1); \
+            lines[line_count].text[sizeof(lines[line_count].text) - 1] = '\0';          \
+            lines[line_count].color = (COLOR_EXPR);                                     \
+            lines[line_count].spacing_after = (SPACING_VALUE);                          \
+            ++line_count;                                                               \
+        }                                                                               \
+    } while (0)
+
+    HEX_ADD_LINE("HEX TILE INFO", header, 24.0f);
+
+    snprintf(line, sizeof(line), "COORD Q=%d R=%d", info->q, info->r);
+    HEX_ADD_LINE(line, accent, 20.0f);
+
+    snprintf(line, sizeof(line), "CENTER (%.1F, %.1F)", info->center_x, info->center_y);
+    HEX_ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "TERRAIN %s", ui_hex_terrain_name(info->terrain));
+    HEX_ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "NECTAR %.1F / %.1F UL", info->nectar_stock, info->nectar_capacity);
+    HEX_ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "RECHARGE %.1F UL/S", info->nectar_recharge_rate);
+    HEX_ADD_LINE(line, text_color, 18.0f);
+
+    snprintf(line, sizeof(line), "FLOW CAPACITY %.1F BEES/S", info->flow_capacity);
+    HEX_ADD_LINE(line, text_color, 18.0f);
+
+#undef HEX_ADD_LINE
+
+    float max_width = 0.0f;
+    for (size_t i = 0; i < line_count; ++i) {
+        float width = ui_measure_text(lines[i].text);
+        if (width > max_width) {
+            max_width = width;
+        }
+    }
+
+    float panel_width = fmaxf(min_panel_width, max_width + padding * 2.0f);
+    float origin_y = g_ui.info_panel_next_y;
+    float origin_x = (float)g_ui.fb_width - panel_width - UI_PANEL_MARGIN;
+    if (origin_x < UI_PANEL_MARGIN) {
+        origin_x = UI_PANEL_MARGIN;
+    }
+    float text_x = origin_x + padding;
+    float cursor_y = origin_y + 18.0f;
+
+    size_t bg_idx = ui_add_rect(origin_x, origin_y, panel_width, 1.0f, bg);
+
+    for (size_t i = 0; i < line_count; ++i) {
+        ui_draw_text(text_x, cursor_y, lines[i].text, lines[i].color);
+        cursor_y += lines[i].spacing_after;
+    }
+
+    float panel_h = (cursor_y + 12.0f) - origin_y;
+    ui_update_rect(bg_idx, origin_x, origin_y, panel_width, panel_h);
+    g_ui.info_panel_next_y = origin_y + panel_h + 12.0f;
+}
+
+static void ui_draw_selection_panels(void) {
+    g_ui.info_panel_next_y = UI_PANEL_MARGIN;
+    ui_draw_selected_bee_panel();
+    ui_draw_selected_hex_panel();
 }
 static GLuint ui_create_shader(const char *vs_src, const char *fs_src) {
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -819,10 +949,15 @@ void ui_init(void) {
     g_ui.program = ui_create_shader(UI_VERTEX_SHADER, UI_FRAGMENT_SHADER);
     g_ui.resolution_uniform = glGetUniformLocation(g_ui.program, "u_resolution");
     g_ui.show_hive_overlay = true;
+    g_ui.show_hex_grid = true;
     g_ui.has_camera = false;
     g_ui.cam_zoom = 1.0f;
     g_ui.selected_valid = false;
     g_ui.selected_panel_open = false;
+    g_ui.selected_hex_valid = false;
+    g_ui.hex_panel_open = false;
+    g_ui.hex_draw_on_top = false;
+    g_ui.info_panel_next_y = UI_PANEL_MARGIN;
     g_ui.panel_scroll = 0.0f;
     g_ui.panel_content_height = 0.0f;
     g_ui.panel_visible_height = 0.0f;
@@ -889,6 +1024,7 @@ static void ui_begin_frame(const Input *input) {
     g_ui.action_focus_queen = false;
     g_ui.wants_mouse = false;
     g_ui.wants_keyboard = false;
+    g_ui.info_panel_next_y = UI_PANEL_MARGIN;
 
     if (!g_ui.has_params || !g_ui.runtime) {
         return;
@@ -928,7 +1064,7 @@ static void ui_begin_frame(const Input *input) {
         g_ui.prev_mouse_down = mouse_down;
         g_ui.panel_scroll = 0.0f;
         g_ui.panel_content_height = 0.0f;
-        ui_draw_selected_bee_panel();
+        ui_draw_selection_panels();
         return;
     }
 
@@ -1205,6 +1341,44 @@ static void ui_begin_frame(const Input *input) {
     panel_max_x = fmaxf(panel_max_x, text_x + 40.0f + ui_measure_text(world_buf));
     cursor_y += 72.0f;
 
+    if (ui_range_intersects(cursor_y - scroll, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(text_x, cursor_y - scroll, "HEX GRID", text);
+    }
+    panel_max_x = fmaxf(panel_max_x, text_x + ui_measure_text("HEX GRID"));
+    cursor_y += 24.0f;
+
+    UiRect grid_rect = {text_x, cursor_y - scroll, content_width, 28.0f};
+    bool grid_visible = ui_range_intersects(grid_rect.y, grid_rect.h, view_top, view_bottom);
+    if (grid_visible) {
+        UiColor btn = g_ui.show_hex_grid ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f);
+        ui_add_rect(grid_rect.x, grid_rect.y, grid_rect.w, grid_rect.h, btn);
+    }
+    panel_max_x = fmaxf(panel_max_x, grid_rect.x + grid_rect.w);
+    if (grid_visible && ui_range_intersects(grid_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(grid_rect.x + 8.0f, grid_rect.y + 6.0f,
+                    g_ui.show_hex_grid ? "GRID VISIBLE" : "GRID HIDDEN", text);
+    }
+    if (mouse_pressed && ui_rect_contains(&grid_rect, g_ui.mouse_x, g_ui.mouse_y)) {
+        g_ui.show_hex_grid = !g_ui.show_hex_grid;
+    }
+    cursor_y += 36.0f;
+
+    UiRect overlay_rect = {text_x, cursor_y - scroll, content_width, 28.0f};
+    bool overlay_visible = ui_range_intersects(overlay_rect.y, overlay_rect.h, view_top, view_bottom);
+    if (overlay_visible) {
+        UiColor btn = g_ui.hex_draw_on_top ? accent : ui_color_rgba(0.2f, 0.2f, 0.25f, 1.0f);
+        ui_add_rect(overlay_rect.x, overlay_rect.y, overlay_rect.w, overlay_rect.h, btn);
+    }
+    panel_max_x = fmaxf(panel_max_x, overlay_rect.x + overlay_rect.w);
+    if (overlay_visible && ui_range_intersects(overlay_rect.y + 6.0f, UI_CHAR_HEIGHT, view_top, view_bottom)) {
+        ui_draw_text(overlay_rect.x + 8.0f, overlay_rect.y + 6.0f,
+                    g_ui.hex_draw_on_top ? "DRAW ON TOP" : "DRAW UNDER BEES", text);
+    }
+    if (mouse_pressed && ui_rect_contains(&overlay_rect, g_ui.mouse_x, g_ui.mouse_y)) {
+        g_ui.hex_draw_on_top = !g_ui.hex_draw_on_top;
+    }
+    cursor_y += 40.0f;
+
     UiRect pause_rect = {text_x, cursor_y - scroll, (content_width - 10.0f) * 0.5f, 28.0f};
     UiRect step_rect = {text_x + pause_rect.w + 10.0f, cursor_y - scroll, pause_rect.w, 28.0f};
     bool pause_visible = ui_range_intersects(pause_rect.y, pause_rect.h, view_top, view_bottom);
@@ -1327,7 +1501,7 @@ static void ui_begin_frame(const Input *input) {
     float max_scroll = fmaxf(0.0f, g_ui.panel_content_height - g_ui.panel_visible_height);
     g_ui.panel_scroll = ui_clampf(g_ui.panel_scroll, 0.0f, max_scroll);
 
-    ui_draw_selected_bee_panel();
+    ui_draw_selection_panels();
 
     if (g_ui.active_slider >= 0 && !mouse_down) {
         g_ui.active_slider = -1;
@@ -1396,4 +1570,12 @@ bool ui_wants_mouse(void) {
 
 bool ui_wants_keyboard(void) {
     return g_ui.wants_keyboard;
+}
+
+bool ui_hex_grid_enabled(void) {
+    return g_ui.show_hex_grid;
+}
+
+bool ui_hex_overlay_on_top(void) {
+    return g_ui.hex_draw_on_top;
 }
