@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "path/path_internal.h"
+#include "path_internal.h"
 #include "util/log.h"
 
 static const int kAxialDirs[6][2] = {

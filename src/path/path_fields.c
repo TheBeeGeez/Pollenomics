@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "path/path_internal.h"
+#include "path_internal.h"
 #include "util/log.h"
 
 typedef struct PathNode {

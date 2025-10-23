@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "path/path_internal.h"
+#include "path_internal.h"
 #include "util/log.h"
 
 static float *g_overlay_lines_xy = NULL;
