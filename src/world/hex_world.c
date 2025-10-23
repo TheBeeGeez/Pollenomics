@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "util/log.h"
+#include <corecrt_math_defines.h>
 
 static uint32_t make_color_rgba(float r, float g, float b, float a) {
     if (r < 0.0f) r = 0.0f;

@@ -956,7 +956,7 @@ void ui_init(void) {
     g_ui.selected_panel_open = false;
     g_ui.selected_hex_valid = false;
     g_ui.hex_panel_open = false;
-    g_ui.hex_draw_on_top = true;
+    g_ui.hex_draw_on_top = false;
     g_ui.info_panel_next_y = UI_PANEL_MARGIN;
     g_ui.panel_scroll = 0.0f;
     g_ui.panel_content_height = 0.0f;
