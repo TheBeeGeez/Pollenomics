@@ -1,6 +1,7 @@
 #include "app.h"
 #include <math.h>
 #include <stddef.h>
+#include "hex.h"
 #include "params.h"
 #include "platform.h"
 #include "render.h"
@@ -24,6 +25,8 @@ static int g_fb_height = 0;
 static float g_sim_fixed_dt = 1.0f / 120.0f;
 static const double g_sim_max_accumulator = 0.25;
 static size_t g_selected_bee_index = SIZE_MAX;
+static HexWorld g_hex_world = {0};
+static size_t g_selected_hex_index = SIZE_MAX;
 static float clampf(float v, float lo, float hi) {
     if (v < lo) {
         return lo;
@@ -201,12 +204,20 @@ bool app_init(const Params *params) {
         return false;
     }
 
+    if (!hex_world_init(&g_hex_world, &g_params)) {
+        LOG_ERROR("Hex world initialization failed");
+        render_shutdown(&g_render);
+        plat_shutdown(&g_platform);
+        return false;
+    }
+
     ui_init();
     ui_sync_to_params(&g_params, &g_params_runtime);
 
     if (!sim_init(&g_sim, &g_params)) {
         LOG_ERROR("Simulation initialization failed");
         ui_shutdown();
+        hex_world_shutdown(&g_hex_world);
         render_shutdown(&g_render);
         plat_shutdown(&g_platform);
         return false;
@@ -278,6 +289,16 @@ static bool app_apply_runtime_params(bool reinit_required) {
     g_params = new_params;
     if (g_params.sim_fixed_dt > 0.0f) {
         g_sim_fixed_dt = g_params.sim_fixed_dt;
+    }
+
+    if (!hex_world_rebuild(&g_hex_world, &g_params)) {
+        LOG_ERROR("hex: rebuild failed; retaining previous grid");
+    } else {
+        size_t tile_count = hex_world_tile_count(&g_hex_world);
+        if (g_selected_hex_index >= tile_count) {
+            g_selected_hex_index = SIZE_MAX;
+            ui_set_selected_hex(NULL, false);
+        }
     }
 
     if (reinit_required || world_changed) {
@@ -382,6 +403,33 @@ void app_frame(void) {
             g_selected_bee_index = SIZE_MAX;
             ui_set_selected_bee(NULL, false);
         }
+
+        size_t hex_tile_count = hex_world_tile_count(&g_hex_world);
+        if (hex_tile_count > 0) {
+            int pick_q = 0;
+            int pick_r = 0;
+            if (hex_world_pick(&g_hex_world, world_x, world_y, &pick_q, &pick_r)) {
+                size_t tile_index = hex_world_index(&g_hex_world, pick_q, pick_r);
+                if (tile_index != SIZE_MAX) {
+                    g_selected_hex_index = tile_index;
+                    HexTileDebugInfo info;
+                    if (hex_world_tile_debug_info(&g_hex_world, tile_index, &info)) {
+                        ui_set_selected_hex(&info, true);
+                    } else {
+                        ui_set_selected_hex(NULL, false);
+                    }
+                } else {
+                    g_selected_hex_index = SIZE_MAX;
+                    ui_set_selected_hex(NULL, false);
+                }
+            } else {
+                g_selected_hex_index = SIZE_MAX;
+                ui_set_selected_hex(NULL, false);
+            }
+        } else if (g_selected_hex_index != SIZE_MAX) {
+            g_selected_hex_index = SIZE_MAX;
+            ui_set_selected_hex(NULL, false);
+        }
     }
 
     Input camera_input = input;
@@ -472,9 +520,32 @@ void app_frame(void) {
         app_recompute_world_defaults();
     }
 
-    float debug_line_points[8] = {0};
-    uint32_t debug_line_colors[2] = {0};
+    float debug_line_points[4 * 8] = {0.0f};
+    uint32_t debug_line_colors[8] = {0};
     size_t debug_line_count = 0;
+
+    RenderHexView hex_view = (RenderHexView){0};
+    RenderHexView *hex_view_ptr = NULL;
+    size_t hex_tile_count = hex_world_tile_count(&g_hex_world);
+    if (hex_tile_count == 0 && g_selected_hex_index != SIZE_MAX) {
+        g_selected_hex_index = SIZE_MAX;
+        ui_set_selected_hex(NULL, false);
+    }
+    if (hex_tile_count > 0) {
+        hex_view.centers_world_xy = hex_world_centers_xy(&g_hex_world);
+        hex_view.scale_world = NULL;
+        hex_view.fill_rgba = hex_world_colors_rgba(&g_hex_world);
+        hex_view.count = hex_tile_count;
+        hex_view.uniform_scale_world = hex_world_cell_radius(&g_hex_world);
+        hex_view.visible = ui_hex_grid_enabled();
+        hex_view.draw_on_top = ui_hex_overlay_on_top();
+        bool highlight_valid = (g_selected_hex_index != SIZE_MAX) &&
+                               (g_selected_hex_index < hex_tile_count);
+        hex_view.highlight_enabled = highlight_valid;
+        hex_view.highlight_index = highlight_valid ? g_selected_hex_index : (size_t)0;
+        hex_view.highlight_fill_rgba = 0xFFFF33FFu;
+        hex_view_ptr = &hex_view;
+    }
 
     RenderView view = (RenderView){0};
     if (g_sim) {
@@ -489,19 +560,25 @@ void app_frame(void) {
                     bool distinct_waypoint = info.path_has_waypoint &&
                                              (fabsf(info.path_waypoint_x - info.path_final_x) > eps ||
                                               fabsf(info.path_waypoint_y - info.path_final_y) > eps);
-                    debug_line_points[0] = info.pos_x;
-                    debug_line_points[1] = info.pos_y;
-                    debug_line_points[2] = distinct_waypoint ? info.path_waypoint_x : info.path_final_x;
-                    debug_line_points[3] = distinct_waypoint ? info.path_waypoint_y : info.path_final_y;
-                    debug_line_colors[0] = debug_color;
-                    debug_line_count = 1;
-                    if (distinct_waypoint) {
-                        debug_line_points[4] = info.path_waypoint_x;
-                        debug_line_points[5] = info.path_waypoint_y;
-                        debug_line_points[6] = info.path_final_x;
-                        debug_line_points[7] = info.path_final_y;
-                        debug_line_colors[1] = debug_color;
-                        debug_line_count = 2;
+                    if (debug_line_count < 8) {
+                        size_t base = debug_line_count * 4;
+                        debug_line_points[base + 0] = info.pos_x;
+                        debug_line_points[base + 1] = info.pos_y;
+                        debug_line_points[base + 2] =
+                            distinct_waypoint ? info.path_waypoint_x : info.path_final_x;
+                        debug_line_points[base + 3] =
+                            distinct_waypoint ? info.path_waypoint_y : info.path_final_y;
+                        debug_line_colors[debug_line_count] = debug_color;
+                        ++debug_line_count;
+                    }
+                    if (distinct_waypoint && debug_line_count < 8) {
+                        size_t base = debug_line_count * 4;
+                        debug_line_points[base + 0] = info.path_waypoint_x;
+                        debug_line_points[base + 1] = info.path_waypoint_y;
+                        debug_line_points[base + 2] = info.path_final_x;
+                        debug_line_points[base + 3] = info.path_final_y;
+                        debug_line_colors[debug_line_count] = debug_color;
+                        ++debug_line_count;
                     }
                 }
             } else {
@@ -513,10 +590,37 @@ void app_frame(void) {
         g_selected_bee_index = SIZE_MAX;
         ui_set_selected_bee(NULL, false);
     }
+    if (g_selected_hex_index != SIZE_MAX) {
+        HexTileDebugInfo hex_info;
+        if (hex_world_tile_debug_info(&g_hex_world, g_selected_hex_index, &hex_info)) {
+            ui_set_selected_hex(&hex_info, true);
+            if (hex_tile_count > 0 && debug_line_count < 8) {
+                float corners[6][2];
+                hex_world_tile_corners(&g_hex_world, hex_info.q, hex_info.r, corners);
+                const uint32_t hex_line_color = 0xFFD780FFu;
+                for (int i = 0; i < 6 && debug_line_count < 8; ++i) {
+                    int next = (i + 1) % 6;
+                    size_t base = debug_line_count * 4;
+                    debug_line_points[base + 0] = corners[i][0];
+                    debug_line_points[base + 1] = corners[i][1];
+                    debug_line_points[base + 2] = corners[next][0];
+                    debug_line_points[base + 3] = corners[next][1];
+                    debug_line_colors[debug_line_count] = hex_line_color;
+                    ++debug_line_count;
+                }
+            }
+        } else {
+            g_selected_hex_index = SIZE_MAX;
+            ui_set_selected_hex(NULL, false);
+        }
+    }
     if (debug_line_count > 0) {
         view.debug_lines_xy = debug_line_points;
         view.debug_line_rgba = debug_line_colors;
         view.debug_line_count = debug_line_count;
+    }
+    if (hex_view_ptr) {
+        view.hex = hex_view_ptr;
     }
     render_set_camera(&g_render, &g_camera);
     render_frame(&g_render, &view);
@@ -532,6 +636,7 @@ void app_shutdown(void) {
     sim_shutdown(g_sim);
     g_sim = NULL;
     ui_shutdown();
+    hex_world_shutdown(&g_hex_world);
     render_shutdown(&g_render);
     plat_shutdown(&g_platform);
     log_shutdown();

@@ -5,6 +5,7 @@
 
 #include "params.h"
 #include "platform.h"
+#include "hex.h"
 #include "render.h"
 #include "sim.h"
 
@@ -27,5 +28,8 @@ bool ui_wants_keyboard(void);
 void ui_set_viewport(const RenderCamera *camera, int framebuffer_width, int framebuffer_height);
 void ui_enable_hive_overlay(bool enabled);
 void ui_set_selected_bee(const BeeDebugInfo *info, bool valid);
+void ui_set_selected_hex(const HexTileDebugInfo *info, bool valid);
+bool ui_hex_grid_enabled(void);
+bool ui_hex_overlay_on_top(void);
 
 #endif  // UI_H

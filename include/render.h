@@ -16,6 +16,19 @@ typedef struct RenderCamera {
     float zoom;
 } RenderCamera;
 
+typedef struct RenderHexView {
+    const float *centers_world_xy;
+    const float *scale_world;
+    const uint32_t *fill_rgba;
+    size_t count;
+    float uniform_scale_world;
+    bool visible;
+    bool draw_on_top;
+    bool highlight_enabled;
+    size_t highlight_index;
+    uint32_t highlight_fill_rgba;
+} RenderHexView;
+
 typedef struct RenderView {
     const float *positions_xy;     // Interleaved XY array, length = count * 2.
     const float *radii_px;         // Radius per element.
@@ -30,6 +43,7 @@ typedef struct RenderView {
     const float *debug_lines_xy;         // Sequence of (start,end) points, 4 floats per line.
     const uint32_t *debug_line_rgba;     // One color per line (0xRRGGBBAA).
     size_t debug_line_count;
+    const RenderHexView *hex;
 } RenderView;
 
 bool render_init(Render *out, const Params *params);

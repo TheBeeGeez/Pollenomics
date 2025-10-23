@@ -70,6 +70,14 @@ void params_init_defaults(Params *params) {
     params->bee.speed_mps = 60.0f;
     params->bee.seek_accel = 220.0f;
     params->bee.arrive_tol_world = params->bee_radius_px * 2.0f;
+
+    params->hex.cell_radius = 42.0f;
+    params->hex.q_min = -36;
+    params->hex.q_max = 36;
+    params->hex.r_min = -28;
+    params->hex.r_max = 28;
+    params->hex.origin_x = params->world_width_px * 0.5f;
+    params->hex.origin_y = params->world_height_px * 0.5f;
 }
 
 bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
@@ -332,6 +340,34 @@ bool params_validate(const Params *params, char *err_buf, size_t err_cap) {
             }
             return false;
         }
+    }
+    if (params->hex.cell_radius <= 0.0f) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "hex cell_radius (%.2f) must be > 0", params->hex.cell_radius);
+        }
+        return false;
+    }
+    int hex_width = params->hex.q_max - params->hex.q_min + 1;
+    int hex_height = params->hex.r_max - params->hex.r_min + 1;
+    if (hex_width <= 0 || hex_height <= 0) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "hex axial bounds invalid q[%d,%d] r[%d,%d]",
+                     params->hex.q_min,
+                     params->hex.q_max,
+                     params->hex.r_min,
+                     params->hex.r_max);
+        }
+        return false;
+    }
+    size_t hex_tiles = (size_t)hex_width * (size_t)hex_height;
+    if (hex_tiles > 500000) {
+        if (err_buf && err_cap > 0) {
+            snprintf(err_buf, err_cap,
+                     "hex tile count (%zu) exceeds limit (500000)", hex_tiles);
+        }
+        return false;
     }
     if (err_buf && err_cap > 0) {
         err_buf[0] = '\0';
