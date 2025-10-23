@@ -122,21 +122,39 @@ static int ui_hex_distance_axial(int q1, int r1, int q2, int r2) {
 static const int UI_HIVE_DIR_Q[6] = {0, 1, 1, 0, -1, -1};
 static const int UI_HIVE_DIR_R[6] = {-1, -1, 0, 1, 1, 0};
 
-static void ui_draw_hive_tile_rect(float cx, float cy, float cell_radius, UiColor color) {
-    float sx = 0.0f;
-    float sy = 0.0f;
-    ui_world_to_screen(cx, cy, &sx, &sy);
-    float sx_right = 0.0f;
-    float sy_right = 0.0f;
-    ui_world_to_screen(cx + cell_radius * 0.8f, cy, &sx_right, &sy_right);
-    float sx_up = 0.0f;
-    float sy_up = 0.0f;
-    ui_world_to_screen(cx, cy + cell_radius * 0.8f, &sx_up, &sy_up);
-    float half_w = fabsf(sx_right - sx);
-    float half_h = fabsf(sy_up - sy);
-    float width = fmaxf(4.0f, half_w * 2.0f);
-    float height = fmaxf(4.0f, half_h * 2.0f);
-    ui_add_rect(sx - width * 0.5f, sy - height * 0.5f, width, height, color);
+static void ui_draw_hive_tile_hex(float cx, float cy, float cell_radius, UiColor color) {
+    static const float OFFSETS[6][2] = {
+        {0.8660254f, 0.5f},
+        {0.0f, 1.0f},
+        {-0.8660254f, 0.5f},
+        {-0.8660254f, -0.5f},
+        {0.0f, -1.0f},
+        {0.8660254f, -0.5f},
+    };
+
+    float center_sx = 0.0f;
+    float center_sy = 0.0f;
+    ui_world_to_screen(cx, cy, &center_sx, &center_sy);
+
+    float corner_sx[6];
+    float corner_sy[6];
+    for (int i = 0; i < 6; ++i) {
+        float wx = cx + cell_radius * OFFSETS[i][0];
+        float wy = cy + cell_radius * OFFSETS[i][1];
+        ui_world_to_screen(wx, wy, &corner_sx[i], &corner_sy[i]);
+    }
+
+    ui_reserve_vertices(18);
+    if (!g_ui.vertices) {
+        return;
+    }
+
+    for (int i = 0; i < 6; ++i) {
+        int next = (i + 1) % 6;
+        ui_push_vertex(center_sx, center_sy, color);
+        ui_push_vertex(corner_sx[i], corner_sy[i], color);
+        ui_push_vertex(corner_sx[next], corner_sy[next], color);
+    }
 }
 
 typedef struct UiHiveWallCandidate {
@@ -585,9 +603,9 @@ static void ui_draw_hive_overlay(void) {
             ui_hex_axial_to_world_params(p, q, r, &cx, &cy);
             if (dist < radius) {
                 if (dist <= storage_radius) {
-                    ui_draw_hive_tile_rect(cx, cy, p->hex.cell_radius, storage_color);
+                    ui_draw_hive_tile_hex(cx, cy, p->hex.cell_radius, storage_color);
                 } else {
-                    ui_draw_hive_tile_rect(cx, cy, p->hex.cell_radius, interior_color);
+                    ui_draw_hive_tile_hex(cx, cy, p->hex.cell_radius, interior_color);
                 }
             } else if (dist == radius) {
                 if (walls && wall_count < max_walls) {
@@ -602,7 +620,7 @@ static void ui_draw_hive_overlay(void) {
                     float score = -(float)dist_to_target + dot * 0.001f;
                     walls[wall_count++] = (UiHiveWallCandidate){cx, cy, score};
                 } else {
-                    ui_draw_hive_tile_rect(cx, cy, p->hex.cell_radius, wall_color);
+                    ui_draw_hive_tile_hex(cx, cy, p->hex.cell_radius, wall_color);
                 }
             }
         }
@@ -618,7 +636,7 @@ static void ui_draw_hive_overlay(void) {
         qsort(walls, wall_count, sizeof(UiHiveWallCandidate), ui_compare_wall_candidate);
         for (size_t i = 0; i < wall_count; ++i) {
             UiColor color = (i < (size_t)entrance_width) ? entrance_color : wall_color;
-            ui_draw_hive_tile_rect(walls[i].cx, walls[i].cy, p->hex.cell_radius, color);
+            ui_draw_hive_tile_hex(walls[i].cx, walls[i].cy, p->hex.cell_radius, color);
         }
     }
 
