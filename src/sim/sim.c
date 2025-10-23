@@ -929,10 +929,11 @@ void sim_tick(SimState *state, float dt_sec) {
         }
 
         target_tile = sim_get_tile_const(state, target_id);
-        if ((mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) && !target_tile) {
-            intent = BEE_INTENT_REST;
-            mode = BEE_MODE_IDLE;
+        bool exploring_without_tile = false;
+        if ((mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) && (!target_tile || target_id < 0)) {
+            exploring_without_tile = true;
             target_id = -1;
+            target_tile = NULL;
         }
 
         if (target_tile) {
@@ -953,7 +954,10 @@ void sim_tick(SimState *state, float dt_sec) {
         } else if (mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING) {
             target_x = entrance_x;
             target_y = entrance_y;
-        } else {
+        } else if (mode == BEE_MODE_UNLOADING) {
+            target_x = unload_x;
+            target_y = unload_y;
+        } else if (mode != BEE_MODE_OUTBOUND && mode != BEE_MODE_FORAGING) {
             target_x = unload_x;
             target_y = unload_y;
         }
@@ -983,12 +987,15 @@ void sim_tick(SimState *state, float dt_sec) {
         float desired_vy = 0.0f;
         if (flight_mode) {
             bool used_flow_field = false;
-            if (distance > 1e-5f) {
+            bool allow_flow_field = (distance > 1e-5f) || exploring_without_tile;
+            if (allow_flow_field) {
                 PathGoal query_goal = PATH_GOAL_COUNT;
                 if (mode == BEE_MODE_RETURNING) {
                     query_goal = PATH_GOAL_ENTRANCE;
                 } else if (mode == BEE_MODE_ENTERING || (mode == BEE_MODE_UNLOADING && unloading_needs_move)) {
                     query_goal = PATH_GOAL_UNLOAD;
+                } else if (exploring_without_tile) {
+                    query_goal = PATH_GOAL_FLOWERS_NEAR;
                 }
                 if (query_goal < PATH_GOAL_COUNT) {
                     TileId query_tile = -1;
@@ -1032,7 +1039,7 @@ void sim_tick(SimState *state, float dt_sec) {
                 }
             }
 
-            if (!used_flow_field && distance > 1e-5f) {
+            if (!used_flow_field && (distance > 1e-5f || exploring_without_tile)) {
                 float dir_x = 0.0f;
                 float dir_y = 0.0f;
                 BeePathPlan path_plan = {0};
@@ -1050,9 +1057,15 @@ void sim_tick(SimState *state, float dt_sec) {
                         path_waypoint_y = path_plan.final_y;
                     }
                 } else {
-                    float inv_dist = 1.0f / distance;
-                    dir_x = dx * inv_dist;
-                    dir_y = dy * inv_dist;
+                    if (distance > 1e-5f) {
+                        float inv_dist = 1.0f / distance;
+                        dir_x = dx * inv_dist;
+                        dir_y = dy * inv_dist;
+                    } else {
+                        float wander_angle = rand_uniform01(&rng) * TWO_PI;
+                        dir_x = cosf(wander_angle);
+                        dir_y = sinf(wander_angle);
+                    }
                     path_valid = 1u;
                     path_has_waypoint = 0u;
                     path_waypoint_x = target_x;
