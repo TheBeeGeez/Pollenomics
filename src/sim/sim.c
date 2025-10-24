@@ -13,6 +13,8 @@
 
 #include "sim_internal.h"
 #include "bee_path.h"
+#include "path/path.h"
+#include "path/path_cost.h"
 #include "world/tiles/tile_flower.h"
 
 static void *alloc_aligned(size_t bytes) {
@@ -98,6 +100,69 @@ static void sim_rebuild_floral_index(SimState *state) {
     size_t *shrink = (size_t *)realloc(indices, count * sizeof(size_t));
     state->floral_tile_indices = shrink ? shrink : indices;
     state->floral_tile_count = count;
+}
+
+static bool sim_resize_congestion_buffers(SimState *state, size_t tile_count) {
+    if (!state) {
+        return false;
+    }
+    if (tile_count == 0) {
+        free(state->tile_crossings);
+        free(state->congestion_tiles);
+        free(state->congestion_rates);
+        state->tile_crossings = NULL;
+        state->congestion_tiles = NULL;
+        state->congestion_rates = NULL;
+        state->congestion_capacity = 0;
+        state->world_tile_count = 0;
+        state->congestion_accum_sec = 0.0;
+        return true;
+    }
+    if (state->congestion_capacity < tile_count) {
+        uint32_t *crossings = (uint32_t *)realloc(state->tile_crossings, tile_count * sizeof(uint32_t));
+        TileId *tiles = (TileId *)realloc(state->congestion_tiles, tile_count * sizeof(TileId));
+        float *rates = (float *)realloc(state->congestion_rates, tile_count * sizeof(float));
+        if (!crossings || !tiles || !rates) {
+            free(crossings);
+            free(tiles);
+            free(rates);
+            state->tile_crossings = NULL;
+            state->congestion_tiles = NULL;
+            state->congestion_rates = NULL;
+            state->congestion_capacity = 0;
+            state->world_tile_count = 0;
+            return false;
+        }
+        state->tile_crossings = crossings;
+        state->congestion_tiles = tiles;
+        state->congestion_rates = rates;
+        state->congestion_capacity = tile_count;
+    }
+    if (state->tile_crossings) {
+        memset(state->tile_crossings, 0, state->congestion_capacity * sizeof(uint32_t));
+    }
+    state->world_tile_count = tile_count;
+    state->congestion_accum_sec = 0.0;
+    return true;
+}
+
+static void sim_refresh_bee_tiles(SimState *state) {
+    if (!state || !state->bee_tile_index) {
+        return;
+    }
+    const HexWorld *world = state->hex_world;
+    size_t tile_count = world ? world->tile_count : 0u;
+    for (size_t i = 0; i < state->count; ++i) {
+        state->bee_tile_index[i] = -1;
+        if (!world || tile_count == 0u) {
+            continue;
+        }
+        size_t tile_index = (size_t)SIZE_MAX;
+        if (hex_world_tile_from_world(world, state->x[i], state->y[i], &tile_index) &&
+            tile_index < tile_count) {
+            state->bee_tile_index[i] = (int32_t)tile_index;
+        }
+    }
 }
 
 static bool sim_has_floral_tiles(const SimState *state) {
@@ -597,6 +662,10 @@ static void sim_release(SimState *state) {
     free_aligned(state->path_waypoint_y);
     free_aligned(state->path_has_waypoint);
     free_aligned(state->path_valid);
+    free_aligned(state->bee_tile_index);
+    free(state->tile_crossings);
+    free(state->congestion_tiles);
+    free(state->congestion_rates);
     sim_free_floral_index(state);
     free(state);
 }
@@ -661,6 +730,7 @@ bool sim_init(SimState **out_state, const Params *params) {
     state->path_waypoint_y = (float *)alloc_aligned(sizeof(float) * count);
     state->path_has_waypoint = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
     state->path_valid = (uint8_t *)alloc_aligned(sizeof(uint8_t) * count);
+    state->bee_tile_index = (int32_t *)alloc_aligned(sizeof(int32_t) * count);
 
     if (!state->x || !state->y || !state->vx || !state->vy || !state->heading ||
         !state->radius || !state->color_rgba || !state->scratch_xy ||
@@ -669,13 +739,26 @@ bool sim_init(SimState **out_state, const Params *params) {
         !state->topic_id || !state->topic_confidence || !state->role ||
         !state->mode || !state->intent || !state->capacity_uL || !state->harvest_rate_uLps ||
         !state->inside_hive_flag || !state->path_waypoint_x || !state->path_waypoint_y ||
-        !state->path_has_waypoint || !state->path_valid) {
+        !state->path_has_waypoint || !state->path_valid || !state->bee_tile_index) {
         LOG_ERROR("sim_init: allocation failure for bee buffers");
         sim_release(state);
         return false;
     }
 
+    if (state->bee_tile_index) {
+        for (size_t i = 0; i < count; ++i) {
+            state->bee_tile_index[i] = -1;
+        }
+    }
+    state->tile_crossings = NULL;
+    state->congestion_tiles = NULL;
+    state->congestion_rates = NULL;
+    state->congestion_capacity = 0u;
+    state->world_tile_count = 0u;
+    state->congestion_accum_sec = 0.0;
+
     fill_bees(state, params, state->seed);
+    sim_refresh_bee_tiles(state);
 
     *out_state = state;
     LOG_INFO("sim: initialized count=%zu capacity=%zu seed=0x%llx dt=%.5f max_speed=%.1f jitter=%.1fdeg/s",
@@ -695,9 +778,15 @@ void sim_bind_hex_world(SimState *state, HexWorld *world) {
     state->hex_world = world;
     if (!world) {
         sim_free_floral_index(state);
+        sim_resize_congestion_buffers(state, 0u);
+        sim_refresh_bee_tiles(state);
         return;
     }
     sim_rebuild_floral_index(state);
+    if (!sim_resize_congestion_buffers(state, world->tile_count)) {
+        LOG_WARN("sim: failed to allocate congestion buffers for %zu tiles", world->tile_count);
+    }
+    sim_refresh_bee_tiles(state);
 }
 
 void sim_tick(SimState *state, float dt_sec) {
@@ -711,6 +800,7 @@ void sim_tick(SimState *state, float dt_sec) {
 
     state->floral_clock_sec += dt_sec;
     sim_tiles_recharge(state, dt_sec);
+    state->congestion_accum_sec += dt_sec;
 
     uint64_t rng = state->rng_state;
     const float world_w = state->world_w;
@@ -839,10 +929,11 @@ void sim_tick(SimState *state, float dt_sec) {
         }
 
         target_tile = sim_get_tile_const(state, target_id);
-        if ((mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) && !target_tile) {
-            intent = BEE_INTENT_REST;
-            mode = BEE_MODE_IDLE;
+        bool exploring_without_tile = false;
+        if ((mode == BEE_MODE_OUTBOUND || mode == BEE_MODE_FORAGING) && (!target_tile || target_id < 0)) {
+            exploring_without_tile = true;
             target_id = -1;
+            target_tile = NULL;
         }
 
         if (target_tile) {
@@ -863,7 +954,10 @@ void sim_tick(SimState *state, float dt_sec) {
         } else if (mode == BEE_MODE_RETURNING || mode == BEE_MODE_ENTERING) {
             target_x = entrance_x;
             target_y = entrance_y;
-        } else {
+        } else if (mode == BEE_MODE_UNLOADING) {
+            target_x = unload_x;
+            target_y = unload_y;
+        } else if (mode != BEE_MODE_OUTBOUND && mode != BEE_MODE_FORAGING) {
             target_x = unload_x;
             target_y = unload_y;
         }
@@ -892,7 +986,60 @@ void sim_tick(SimState *state, float dt_sec) {
         float desired_vx = 0.0f;
         float desired_vy = 0.0f;
         if (flight_mode) {
-            if (distance > 1e-5f) {
+            bool used_flow_field = false;
+            bool allow_flow_field = (distance > 1e-5f) || exploring_without_tile;
+            if (allow_flow_field) {
+                PathGoal query_goal = PATH_GOAL_COUNT;
+                if (mode == BEE_MODE_RETURNING) {
+                    query_goal = PATH_GOAL_ENTRANCE;
+                } else if (mode == BEE_MODE_ENTERING || (mode == BEE_MODE_UNLOADING && unloading_needs_move)) {
+                    query_goal = PATH_GOAL_UNLOAD;
+                } else if (exploring_without_tile) {
+                    query_goal = PATH_GOAL_FLOWERS_NEAR;
+                }
+                if (query_goal < PATH_GOAL_COUNT) {
+                    TileId query_tile = -1;
+                    if (state->bee_tile_index) {
+                        query_tile = state->bee_tile_index[i];
+                    }
+                    if (query_tile < 0 && state->hex_world) {
+                        size_t tile_index = (size_t)SIZE_MAX;
+                        if (hex_world_tile_from_world(state->hex_world, x, y, &tile_index) &&
+                            tile_index < state->world_tile_count) {
+                            query_tile = (TileId)tile_index;
+                            if (state->bee_tile_index) {
+                                state->bee_tile_index[i] = (int32_t)tile_index;
+                            }
+                        }
+                    }
+                    if (query_tile >= 0) {
+                        PathVec2 field_dir = {0.0f, 0.0f};
+                        if (path_query_direction(query_goal, query_tile, &field_dir)) {
+                            float len_sq = field_dir.x * field_dir.x + field_dir.y * field_dir.y;
+                            if (len_sq > 1e-6f) {
+                                float jitter = 0.08f * rand_symmetric(&rng);
+                                float cos_j = cosf(jitter);
+                                float sin_j = sinf(jitter);
+                                float rot_x = field_dir.x * cos_j - field_dir.y * sin_j;
+                                float rot_y = field_dir.x * sin_j + field_dir.y * cos_j;
+                                desired_vx = rot_x * base_speed;
+                                desired_vy = rot_y * base_speed;
+                                float arrow_scale = state->hex_world ? state->hex_world->cell_radius : current_arrive_tol;
+                                if (arrow_scale <= 0.0f) {
+                                    arrow_scale = current_arrive_tol;
+                                }
+                                path_waypoint_x = x + field_dir.x * arrow_scale;
+                                path_waypoint_y = y + field_dir.y * arrow_scale;
+                                path_has_waypoint = 0u;
+                                path_valid = 2u;
+                                used_flow_field = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!used_flow_field && (distance > 1e-5f || exploring_without_tile)) {
                 float dir_x = 0.0f;
                 float dir_y = 0.0f;
                 BeePathPlan path_plan = {0};
@@ -910,9 +1057,15 @@ void sim_tick(SimState *state, float dt_sec) {
                         path_waypoint_y = path_plan.final_y;
                     }
                 } else {
-                    float inv_dist = 1.0f / distance;
-                    dir_x = dx * inv_dist;
-                    dir_y = dy * inv_dist;
+                    if (distance > 1e-5f) {
+                        float inv_dist = 1.0f / distance;
+                        dir_x = dx * inv_dist;
+                        dir_y = dy * inv_dist;
+                    } else {
+                        float wander_angle = rand_uniform01(&rng) * TWO_PI;
+                        dir_x = cosf(wander_angle);
+                        dir_y = sinf(wander_angle);
+                    }
                     path_valid = 1u;
                     path_has_waypoint = 0u;
                     path_waypoint_x = target_x;
@@ -1107,10 +1260,60 @@ void sim_tick(SimState *state, float dt_sec) {
         if (conf < 0.0f) conf = 0.0f;
         if (conf > 255.0f) conf = 255.0f;
         state->topic_confidence[i] = (uint8_t)(conf + 0.5f);
+
+        if (state->bee_tile_index && state->tile_crossings && state->hex_world &&
+            state->world_tile_count > 0u) {
+            size_t tile_index = (size_t)SIZE_MAX;
+            if (hex_world_tile_from_world(state->hex_world, x, y, &tile_index) &&
+                tile_index < state->world_tile_count) {
+                int32_t prev_tile = state->bee_tile_index[i];
+                int32_t new_tile = (int32_t)tile_index;
+                if (prev_tile != new_tile) {
+                    if (prev_tile >= 0 && (size_t)prev_tile < state->world_tile_count) {
+                        state->tile_crossings[prev_tile] += 1u;
+                    }
+                    state->tile_crossings[new_tile] += 1u;
+                    state->bee_tile_index[i] = new_tile;
+                }
+            } else {
+                int32_t prev_tile = state->bee_tile_index[i];
+                if (prev_tile >= 0 && (size_t)prev_tile < state->world_tile_count) {
+                    state->tile_crossings[prev_tile] += 1u;
+                }
+                state->bee_tile_index[i] = -1;
+            }
+        }
     }
 
     state->rng_state = rng;
     update_scratch(state);
+
+    const double kCongestionSamplePeriod = 0.5;
+    if (state->hex_world && state->tile_crossings && state->congestion_tiles && state->congestion_rates &&
+        state->world_tile_count > 0u && state->congestion_capacity >= state->world_tile_count &&
+        state->congestion_accum_sec >= kCongestionSamplePeriod) {
+        double sample_dt = state->congestion_accum_sec;
+        if (sample_dt <= 0.0) {
+            sample_dt = kCongestionSamplePeriod;
+        }
+        size_t emit = 0u;
+        for (size_t t = 0; t < state->world_tile_count; ++t) {
+            uint32_t crossings = state->tile_crossings[t];
+            if (crossings == 0u) {
+                continue;
+            }
+            if (emit < state->congestion_capacity) {
+                state->congestion_tiles[emit] = (TileId)t;
+                state->congestion_rates[emit] = (float)((double)crossings / sample_dt);
+                ++emit;
+            }
+            state->tile_crossings[t] = 0u;
+        }
+        if (emit > 0u) {
+            path_cost_add_crowd_samples(state->congestion_tiles, state->congestion_rates, (int)emit);
+        }
+        state->congestion_accum_sec = 0.0;
+    }
 
     state->log_accum_sec += dt_sec;
     state->log_bounce_count += bounce_counter;
