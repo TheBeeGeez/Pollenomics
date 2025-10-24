@@ -37,11 +37,12 @@ typedef struct PathSchedulerState {
     size_t shared_dirty_count;
     bool shared_dirty_valid;
     bool shared_dirty_used[PATH_GOAL_COUNT];
+    int next_goal_start;
 } PathSchedulerState;
 
 static PathSchedulerState g_sched = {0};
 
-static const float kDefaultCadenceHz[] = {10.0f, 6.0f, 3.0f};
+static const float kDefaultCadenceHz[] = {10.0f, 10.0f, 3.0f};
 
 static inline double cadence_to_interval(float hz) {
     return (hz > 0.0f) ? (1000.0 / (double)hz) : 0.0;
@@ -157,6 +158,7 @@ void path_sched_reset_state(void) {
         clear_goal_state(&g_sched.goals[i], i);
     }
     reset_shared_batch();
+    g_sched.next_goal_start = 0;
 }
 
 void path_sched_shutdown_state(void) {
@@ -225,6 +227,10 @@ bool path_sched_update(float dt_sec, bool out_field_swapped[PATH_GOAL_COUNT]) {
         }
     }
 
+    if (PATH_GOAL_COUNT <= 0) {
+        return true;
+    }
+
     double dt_ms = (dt_sec > 0.0f) ? (double)dt_sec * 1000.0 : 0.0;
     for (int goal = 0; goal < PATH_GOAL_COUNT; ++goal) {
         PathSchedGoalState *state = &g_sched.goals[goal];
@@ -236,7 +242,23 @@ bool path_sched_update(float dt_sec, bool out_field_swapped[PATH_GOAL_COUNT]) {
     double remaining_budget = g_sched.budget_ms;
     bool track_budget = (g_sched.budget_ms > 0.0f);
 
-    for (int goal = 0; goal < PATH_GOAL_COUNT; ++goal) {
+    int original_start = g_sched.next_goal_start % PATH_GOAL_COUNT;
+    if (original_start < 0) {
+        original_start = 0;
+    }
+    int start_index = original_start;
+    for (int i = 0; i < PATH_GOAL_COUNT; ++i) {
+        int idx = (original_start + i) % PATH_GOAL_COUNT;
+        if (g_sched.goals[idx].building) {
+            start_index = idx;
+            break;
+        }
+    }
+
+    bool any_progress = false;
+
+    for (int step = 0; step < PATH_GOAL_COUNT; ++step) {
+        int goal = (start_index + step) % PATH_GOAL_COUNT;
         PathSchedGoalState *state = &g_sched.goals[goal];
         if (!state->has_data) {
             continue;
@@ -333,6 +355,7 @@ bool path_sched_update(float dt_sec, bool out_field_swapped[PATH_GOAL_COUNT]) {
         }
 
         if (stepped) {
+            any_progress = true;
             if (track_budget && step_ms > 0.0) {
                 if (step_ms >= remaining_budget) {
                     remaining_budget = 0.0;
@@ -357,6 +380,23 @@ bool path_sched_update(float dt_sec, bool out_field_swapped[PATH_GOAL_COUNT]) {
     }
 
     finalize_shared_batch_if_consumed();
+
+    int next_start = -1;
+    for (int i = 0; i < PATH_GOAL_COUNT; ++i) {
+        if (g_sched.goals[i].building) {
+            next_start = i;
+            break;
+        }
+    }
+    if (next_start < 0) {
+        if (any_progress) {
+            next_start = (original_start + 1) % PATH_GOAL_COUNT;
+        } else {
+            next_start = original_start;
+        }
+    }
+    g_sched.next_goal_start = next_start;
+
     return true;
 }
 
