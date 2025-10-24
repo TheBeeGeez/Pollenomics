@@ -312,8 +312,6 @@ bool path_fields_start_build(PathGoal goal,
     }
 
     if (dirty_tiles && dirty_count > 0u) {
-        const float *active_dist = goal_state->dist[goal_state->active_index];
-        const uint8_t *active_next = goal_state->next[goal_state->active_index];
         for (size_t i = 0; i < dirty_count; ++i) {
             TileId nid = dirty_tiles[i];
             if ((size_t)nid >= tile_count) {
@@ -322,17 +320,8 @@ bool path_fields_start_build(PathGoal goal,
             if (build->dist[nid] == 0.0f) {
                 continue;
             }
-            float seed_dist = (active_dist && (size_t)nid < tile_count) ? active_dist[nid] : kInf;
-            uint8_t seed_next = (active_next && (size_t)nid < tile_count) ? active_next[nid] : 255u;
-            if (seed_dist < kInf) {
-                build->dist[nid] = seed_dist;
-                build->next[nid] = seed_next;
-                if (!heap_push(&build->heap, nid, seed_dist)) {
-                    LOG_ERROR("path: failed to push dirty seed for goal %d", (int)goal);
-                    path_fields_cancel_build(goal);
-                    return false;
-                }
-            }
+            build->dist[nid] = kInf;
+            build->next[nid] = 255u;
         }
     }
 
